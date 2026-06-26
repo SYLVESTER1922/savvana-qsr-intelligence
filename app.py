@@ -65,10 +65,25 @@ def load_data():
         print(f"Sheet load error: {e}")
         return pd.DataFrame()
 
-# Load on startup
+# ── Auto-refresh cache (reloads every 5 minutes) ─────────────
+import time as _time
+_cache = {'df': pd.DataFrame(), 'loaded_at': 0}
+CACHE_TTL = 300  # 5 minutes
+
+def get_df():
+    now = _time.time()
+    if now - _cache['loaded_at'] > CACHE_TTL or _cache['df'].empty:
+        fresh = load_data()
+        if not fresh.empty:
+            _cache['df'] = fresh
+            _cache['loaded_at'] = now
+            print(f"Data refreshed — {len(fresh)} rows")
+    return _cache['df']
+
+# Initial load
 print("Loading data from Google Sheets...")
-df = load_data()
-print(f"Loaded {len(df)} rows | {df['date'].min()} → {df['date'].max()}" if len(df) else "No data loaded")
+df = get_df()
+print(f"Loaded {len(df)} rows" if len(df) else "No data loaded — will retry on first request")
 
 COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
 BRANDS    = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
@@ -106,9 +121,9 @@ def dark(title, height=360, **kwargs):
 COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
 
 def refresh_data():
-    global df
-    df = load_data()
-    return f"✅ Refreshed — {len(df)} rows loaded"
+    _cache['loaded_at'] = 0  # force reload
+    fresh = get_df()
+    return f"✅ Refreshed — {len(fresh)} rows loaded"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -116,6 +131,7 @@ def refresh_data():
 # ═══════════════════════════════════════════════════════════════
 
 def build_dashboard(period):
+    df = get_df()
     if df.empty:
         empty = go.Figure().update_layout(**dark("No data available"))
         return [empty]*6
@@ -264,6 +280,7 @@ def build_dashboard(period):
 # ═══════════════════════════════════════════════════════════════
 
 def generate_forecast(segment_type, segment_name, horizon):
+    df = get_df()
     if df.empty:
         return go.Figure().update_layout(**dark("No data available")), ""
 
@@ -398,6 +415,7 @@ def update_forecast_segments(seg_type):
 
 # ── Deterministic query functions ─────────────────────────────
 def q_total_revenue(period_days=None):
+    df = get_df()
     d = df.copy()
     if period_days:
         cutoff = d['date'].max() - timedelta(days=period_days)
@@ -406,16 +424,19 @@ def q_total_revenue(period_days=None):
     return f"Total revenue: ${total:,.2f}"
 
 def q_top_complex():
+    df = get_df()
     top = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
     val = df.groupby('complex')['actual_revenue_usd'].sum().max()
     return f"Top complex: {top} with ${val:,.2f}"
 
 def q_top_brand():
+    df = get_df()
     top = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
     val = df.groupby('brand')['actual_revenue_usd'].sum().max()
     return f"Top brand: {top} with ${val:,.2f}"
 
 def q_underperforming(threshold=0.80):
+    df = get_df()
     latest = df['date'].max()
     recent = df[df['date'] >= latest - timedelta(days=7)]
     perf = recent.groupby(['complex','brand']).apply(
@@ -429,6 +450,7 @@ def q_underperforming(threshold=0.80):
     return "Underperforming (below 80% budget, last 7 days):\n" + "\n".join(lines)
 
 def q_avg_spend():
+    df = get_df()
     avs = df[df['customer_count']>0].groupby('complex').apply(
         lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()
     ).reset_index(name='avg')
@@ -436,6 +458,7 @@ def q_avg_spend():
     return "Average spend per customer by complex:\n" + "\n".join(lines)
 
 def q_sdlm_comparison():
+    df = get_df()
     total_act  = df['actual_revenue_usd'].sum()
     total_sdlm = df['prior_month_actual'].sum()
     if total_sdlm == 0:
@@ -445,6 +468,7 @@ def q_sdlm_comparison():
     return f"vs Prior Month (SDLM): ${total_act:,.2f} vs ${total_sdlm:,.2f} — {'+' if diff>=0 else ''}{diff:,.2f} ({pct:+.1f}%)"
 
 def q_sdly_comparison():
+    df = get_df()
     total_act  = df['actual_revenue_usd'].sum()
     total_sdly = df['prior_year_actual'].sum()
     if total_sdly == 0:
@@ -454,11 +478,13 @@ def q_sdly_comparison():
     return f"vs Prior Year (SDLY): ${total_act:,.2f} vs ${total_sdly:,.2f} — {'+' if diff>=0 else ''}{diff:,.2f} ({pct:+.1f}%)"
 
 def q_best_day():
+    df = get_df()
     dow_rev = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
     best    = dow_rev.idxmax()
     return f"Best revenue day of week: {best} (avg ${dow_rev[best]:,.2f}/day)"
 
 def q_holiday_impact():
+    df = get_df()
     if 'is_holiday' not in df.columns:
         return "Holiday data not available."
     hol  = df[df['is_holiday']==1]['actual_revenue_usd'].mean()
@@ -468,6 +494,7 @@ def q_holiday_impact():
     return f"Holiday vs normal day: ${hol:,.2f} vs ${norm:,.2f} avg per row ({diff:+.1f}%)"
 
 def q_moving_average(days=7):
+    df = get_df()
     latest = df['date'].max()
     cutoff = latest - timedelta(days=days)
     recent = df[df['date']>=cutoff]
@@ -475,6 +502,7 @@ def q_moving_average(days=7):
     return f"{days}-day moving average daily revenue: ${ma:,.2f}"
 
 def q_complex_brand(cx, brd):
+    df = get_df()
     sub = df[(df['complex']==cx)&(df['brand']==brd)]
     if sub.empty: return f"No data for {cx} / {brd}"
     total = sub['actual_revenue_usd'].sum()
@@ -485,6 +513,7 @@ def q_complex_brand(cx, brd):
             f"Budget achievement: {ach:.1f}%")
 
 def q_revenue_per_counter():
+    df = get_df()
     rpc = df.groupby('complex').apply(
         lambda x: x['actual_revenue_usd'].sum()/x['counters_open'].sum()
         if x['counters_open'].sum()>0 else 0
@@ -494,6 +523,7 @@ def q_revenue_per_counter():
 
 # ── Intent router ──────────────────────────────────────────────
 def route_intent(message):
+    df = get_df()
     m = message.lower()
     if any(x in m for x in ['underperform','below budget','struggling','worst']):
         return q_underperforming()
@@ -537,6 +567,7 @@ def route_intent(message):
     return None
 
 def build_system_prompt():
+    df = get_df()
     if df.empty:
         return "You are a QSR intelligence assistant. No data is currently loaded."
 
@@ -641,6 +672,7 @@ footer{display:none!important;}
 """
 
 def get_kpis():
+    df = get_df()
     if df.empty:
         return "No data loaded", "—", "—", "—", "—"
     latest    = df['date'].max()
@@ -681,7 +713,7 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as
                 <div style="color:#7fb3d3;font-size:11px;">Total Revenue</div>
             </div>
             <div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;">
-                <div style="color:#{'2ecc71' if float(ach_pct.replace('%',''))>=100 else 'e74c3c'};font-size:18px;font-weight:700;">{ach_pct}</div>
+                <div style="color:#c9a84c;font-size:18px;font-weight:700;">{ach_pct}</div>
                 <div style="color:#7fb3d3;font-size:11px;">Budget Achievement</div>
             </div>
             <div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;">
