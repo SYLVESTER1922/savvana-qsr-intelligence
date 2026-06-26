@@ -20,7 +20,15 @@ CREDS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 GROWTH_RATE = 0.05
 
 def get_sheets_service():
-    creds_dict = json.loads(CREDS_JSON)
+    if not CREDS_JSON:
+        raise ValueError("GOOGLE_CREDENTIALS_JSON secret is empty or not set")
+    try:
+        creds_dict = json.loads(CREDS_JSON)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_CREDENTIALS_JSON is not valid JSON: {e}")
+    # Fix newlines in private key if they got corrupted
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -416,6 +424,7 @@ def update_forecast_segments(seg_type):
 # ── Deterministic query functions ─────────────────────────────
 def q_total_revenue(period_days=None):
     df = get_df()
+    if df.empty: return "No data loaded yet."
     d = df.copy()
     if period_days:
         cutoff = d['date'].max() - timedelta(days=period_days)
@@ -425,18 +434,21 @@ def q_total_revenue(period_days=None):
 
 def q_top_complex():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     top = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
     val = df.groupby('complex')['actual_revenue_usd'].sum().max()
     return f"Top complex: {top} with ${val:,.2f}"
 
 def q_top_brand():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     top = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
     val = df.groupby('brand')['actual_revenue_usd'].sum().max()
     return f"Top brand: {top} with ${val:,.2f}"
 
 def q_underperforming(threshold=0.80):
     df = get_df()
+    if df.empty: return "No data loaded yet."
     latest = df['date'].max()
     recent = df[df['date'] >= latest - timedelta(days=7)]
     perf = recent.groupby(['complex','brand']).apply(
@@ -451,6 +463,7 @@ def q_underperforming(threshold=0.80):
 
 def q_avg_spend():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     avs = df[df['customer_count']>0].groupby('complex').apply(
         lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()
     ).reset_index(name='avg')
@@ -459,6 +472,7 @@ def q_avg_spend():
 
 def q_sdlm_comparison():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     total_act  = df['actual_revenue_usd'].sum()
     total_sdlm = df['prior_month_actual'].sum()
     if total_sdlm == 0:
@@ -469,6 +483,7 @@ def q_sdlm_comparison():
 
 def q_sdly_comparison():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     total_act  = df['actual_revenue_usd'].sum()
     total_sdly = df['prior_year_actual'].sum()
     if total_sdly == 0:
@@ -479,12 +494,14 @@ def q_sdly_comparison():
 
 def q_best_day():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     dow_rev = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
     best    = dow_rev.idxmax()
     return f"Best revenue day of week: {best} (avg ${dow_rev[best]:,.2f}/day)"
 
 def q_holiday_impact():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     if 'is_holiday' not in df.columns:
         return "Holiday data not available."
     hol  = df[df['is_holiday']==1]['actual_revenue_usd'].mean()
@@ -495,6 +512,7 @@ def q_holiday_impact():
 
 def q_moving_average(days=7):
     df = get_df()
+    if df.empty: return "No data loaded yet."
     latest = df['date'].max()
     cutoff = latest - timedelta(days=days)
     recent = df[df['date']>=cutoff]
@@ -514,6 +532,7 @@ def q_complex_brand(cx, brd):
 
 def q_revenue_per_counter():
     df = get_df()
+    if df.empty: return "No data loaded yet."
     rpc = df.groupby('complex').apply(
         lambda x: x['actual_revenue_usd'].sum()/x['counters_open'].sum()
         if x['counters_open'].sum()>0 else 0
@@ -524,6 +543,8 @@ def q_revenue_per_counter():
 # ── Intent router ──────────────────────────────────────────────
 def route_intent(message):
     df = get_df()
+    if df.empty:
+        return None
     m = message.lower()
     if any(x in m for x in ['underperform','below budget','struggling','worst']):
         return q_underperforming()
