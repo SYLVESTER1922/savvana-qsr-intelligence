@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 import gradio as gr
-from supabase import create_client, Client
 from openai import OpenAI
 from docx import Document
 from pptx import Presentation
