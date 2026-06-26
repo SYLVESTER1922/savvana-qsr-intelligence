@@ -1,32 +1,44 @@
 import os
 import json
+import time
 import gradio as gr
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from openai import OpenAI
 from datetime import datetime, timedelta
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 import warnings
 warnings.filterwarnings('ignore')
 
 # ═══════════════════════════════════════════════════════════════
-# GOOGLE SHEETS CONNECTION
+# CONFIG
 # ═══════════════════════════════════════════════════════════════
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
-SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "1HhGAibq90EMUj3m_GnVKLaWpCLxRC9GD")
-CREDS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+SHEET_ID    = os.environ.get("GOOGLE_SHEET_ID", "1H7rqtZUKOMi2TgV27kcSkbFHQ7H1EDuMc8J2xHfTWrE")
+CREDS_JSON  = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 GROWTH_RATE = 0.05
+CACHE_TTL   = 300  # 5 minutes
+
+_cache = {'df': pd.DataFrame(), 'loaded_at': 0}
+
+COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
+BRANDS    = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
+REGIONS   = {'Westgate Mall':'Harare','City Centre':'Harare',
+             'Eastpark':'Bulawayo','Northgate':'Bulawayo'}
+COLORS    = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
+
+
+# ═══════════════════════════════════════════════════════════════
+# DATA LAYER
+# ═══════════════════════════════════════════════════════════════
 
 def get_sheets_service():
     if not CREDS_JSON:
-        raise ValueError("GOOGLE_CREDENTIALS_JSON secret is empty or not set")
-    try:
-        creds_dict = json.loads(CREDS_JSON)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"GOOGLE_CREDENTIALS_JSON is not valid JSON: {e}")
-    # Fix newlines in private key if they got corrupted
+        raise ValueError("GOOGLE_CREDENTIALS_JSON secret not set")
+    creds_dict = json.loads(CREDS_JSON)
     if "private_key" in creds_dict:
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(
@@ -46,26 +58,27 @@ def load_data():
         if not rows or len(rows) < 2:
             return pd.DataFrame()
         headers = rows[0]
-        data    = rows[1:]
+        data    = [r for r in rows[1:] if any(c.strip() for c in r)]
+        if not data:
+            return pd.DataFrame()
         df = pd.DataFrame(data, columns=headers[:len(data[0])] if data else headers)
-
-        # Clean & type-cast
         numeric_cols = ['budget_usd','actual_revenue_usd','prior_month_actual',
                         'prior_year_actual','customer_count','counters_open',
-                        'variance_vs_budget','avg_spend_per_cust','revenue_per_counter',
-                        'vs_prior_month_var','vs_prior_year_var','is_holiday']
+                        'variance_vs_budget','avg_spend_per_cust',
+                        'revenue_per_counter','is_holiday']
         for col in numeric_cols:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace('$','').str.replace(',',''), errors='coerce').fillna(0)
-
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace('[$,]','',regex=True),
+                    errors='coerce').fillna(0)
         pct_cols = ['variance_pct','vs_prior_month_pct','vs_prior_year_pct']
         for col in pct_cols:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace('%',''), errors='coerce').fillna(0) / 100
-
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace('%','',regex=True),
+                    errors='coerce').fillna(0)
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
-
         df = df.dropna(subset=['date','actual_revenue_usd']).copy()
         df = df[df['actual_revenue_usd'] > 0].copy()
         return df.sort_values('date').reset_index(drop=True)
@@ -73,65 +86,65 @@ def load_data():
         print(f"Sheet load error: {e}")
         return pd.DataFrame()
 
-# ── Auto-refresh cache (reloads every 5 minutes) ─────────────
-import time as _time
-_cache = {'df': pd.DataFrame(), 'loaded_at': 0}
-CACHE_TTL = 300  # 5 minutes
-
 def get_df():
-    now = _time.time()
+    now = time.time()
     if now - _cache['loaded_at'] > CACHE_TTL or _cache['df'].empty:
         fresh = load_data()
         if not fresh.empty:
-            _cache['df'] = fresh
+            _cache['df']        = fresh
             _cache['loaded_at'] = now
             print(f"Data refreshed — {len(fresh)} rows")
     return _cache['df']
 
-# Initial load
+def refresh_data():
+    _cache['loaded_at'] = 0
+    fresh = get_df()
+    if fresh.empty:
+        return "⚠️ Still no data — check logs for connection errors"
+    return f"✅ Refreshed — {len(fresh)} rows loaded ({fresh['date'].min().strftime('%b %d, %Y')} → {fresh['date'].max().strftime('%b %d, %Y')})"
+
 print("Loading data from Google Sheets...")
-df = get_df()
-print(f"Loaded {len(df)} rows" if len(df) else "No data loaded — will retry on first request")
+_ = get_df()
 
-COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
-BRANDS    = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
-REGIONS   = {'Westgate Mall':'Harare','City Centre':'Harare','Eastpark':'Bulawayo','Northgate':'Bulawayo'}
 
-# OpenAI client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
-
-# ── Helper ────────────────────────────────────────────────────
-def hex_rgba(h, a=0.15):
-    h = h.lstrip('#')
-    r,g,b = tuple(int(h[i:i+2],16) for i in (0,2,4))
-    return f'rgba({r},{g},{b},{a})'
+# ═══════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════
 
 def fmt(v):
     if v >= 1_000_000: return f"${v/1_000_000:.2f}M"
     if v >= 1_000:     return f"${v/1_000:.0f}K"
     return f"${v:,.0f}"
 
-DARK = dict(
-    paper_bgcolor='#0a1628', plot_bgcolor='#0d1f38',
-    font=dict(color='#c8d8f0',family='Arial',size=11),
-    xaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
-    yaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
-    legend=dict(bgcolor='rgba(10,22,40,0.85)',bordercolor='#1a3a6e',
-                borderwidth=1,font=dict(color='#c8d8f0')),
-)
+def hex_rgba(h, a=0.15):
+    h = h.lstrip('#')
+    r,g,b = tuple(int(h[i:i+2],16) for i in (0,2,4))
+    return f'rgba({r},{g},{b},{a})'
 
-def dark(title, height=360, **kwargs):
-    d = dict(DARK); d.update(kwargs)
-    d['title'] = dict(text=title, font=dict(color='#c9a84c',size=14))
-    d['height'] = height
-    return d
+def dark(title, height=360):
+    return dict(
+        title=dict(text=title, font=dict(color='#c9a84c',size=14)),
+        paper_bgcolor='#0a1628', plot_bgcolor='#0d1f38',
+        font=dict(color='#c8d8f0',family='Arial',size=11),
+        height=height,
+        xaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
+        yaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
+        legend=dict(bgcolor='rgba(10,22,40,0.85)',bordercolor='#1a3a6e',
+                    borderwidth=1,font=dict(color='#c8d8f0')),
+    )
 
-COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
-
-def refresh_data():
-    _cache['loaded_at'] = 0  # force reload
-    fresh = get_df()
-    return f"✅ Refreshed — {len(fresh)} rows loaded"
+def get_kpis():
+    df = get_df()
+    if df.empty:
+        return "No data", "—", "—", "—", "—"
+    latest    = df['date'].max()
+    total_rev = df['actual_revenue_usd'].sum()
+    total_bud = df['budget_usd'].sum() if 'budget_usd' in df.columns else 0
+    ach       = f"{total_rev/total_bud*100:.1f}%" if total_bud > 0 else "—"
+    top_cx    = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
+    top_br    = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
+    date_rng  = f"{df['date'].min().strftime('%b %d')} – {latest.strftime('%b %d, %Y')}"
+    return date_rng, fmt(total_rev), ach, top_cx, top_br
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -141,12 +154,11 @@ def refresh_data():
 def build_dashboard(period):
     df = get_df()
     if df.empty:
-        empty = go.Figure().update_layout(**dark("No data available"))
+        empty = go.Figure().update_layout(**dark("No data — click Refresh Data"))
         return [empty]*6
 
     dff = df.copy()
     latest = dff['date'].max()
-
     if period == 'Last 7 Days':
         dff = dff[dff['date'] >= latest - timedelta(days=7)]
     elif period == 'Last 30 Days':
@@ -154,223 +166,169 @@ def build_dashboard(period):
     elif period == 'Last 90 Days':
         dff = dff[dff['date'] >= latest - timedelta(days=90)]
     elif period == 'MTD':
-        dff = dff[(dff['date'].dt.month == latest.month) & (dff['date'].dt.year == latest.year)]
+        dff = dff[(dff['date'].dt.month == latest.month) &
+                  (dff['date'].dt.year  == latest.year)]
 
-    # ── 1. Revenue by Complex ──────────────────────────────────
-    cx_rev = dff.groupby('complex').agg(
+    # 1. Revenue by Complex
+    cx = dff.groupby('complex').agg(
         actual=('actual_revenue_usd','sum'),
-        budget=('budget_usd','sum'),
-        sdlm=('prior_month_actual','sum'),
-        sdly=('prior_year_actual','sum')
-    ).reset_index().sort_values('actual', ascending=True)
-
-    fig1 = go.Figure()
-    fig1.add_trace(go.Bar(name='Budget',x=cx_rev['budget'],y=cx_rev['complex'],
-        orientation='h',marker_color='#1a3a6e',opacity=0.7))
-    fig1.add_trace(go.Bar(name='Actual',x=cx_rev['actual'],y=cx_rev['complex'],
-        orientation='h',marker_color='#c9a84c',
-        text=[fmt(v) for v in cx_rev['actual']],textposition='outside',
-        textfont=dict(color='#c8d8f0',size=11)))
-    fig1.update_layout(**dark("Revenue by Complex — Actual vs Budget",height=300,
-        barmode='overlay',margin=dict(l=140,r=80,t=50,b=40)),
-        xaxis=dict(title="Revenue (USD)",tickprefix="$",tickformat=",.0f",
-                   gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
-        yaxis=dict(tickfont=dict(color='#c8d8f0')))
-
-    # ── 2. Revenue by Brand ────────────────────────────────────
-    br_rev = dff.groupby('brand').agg(
-        actual=('actual_revenue_usd','sum'),
-        budget=('budget_usd','sum')
+        budget=('budget_usd','sum') if 'budget_usd' in dff.columns else ('actual_revenue_usd','sum')
     ).reset_index().sort_values('actual',ascending=True)
-
-    fig2 = go.Figure()
-    for i,row in enumerate(br_rev.itertuples()):
-        pct = (row.actual-row.budget)/row.budget*100 if row.budget else 0
-        color = '#2ecc71' if pct>=0 else '#e74c3c'
-        fig2.add_trace(go.Bar(name=row.brand,x=[row.actual],y=[row.brand],
-            orientation='h',marker_color=COLORS[i%len(COLORS)],
-            text=[f"{fmt(row.actual)} ({pct:+.1f}%)"],textposition='outside',
-            textfont=dict(color='#c8d8f0',size=11),showlegend=False))
-    fig2.update_layout(**dark("Revenue by Brand — with Budget Achievement",height=280,
-        margin=dict(l=140,r=120,t=50,b=40)),
+    fig1 = go.Figure()
+    fig1.add_trace(go.Bar(name='Budget',x=cx['budget'],y=cx['complex'],
+        orientation='h',marker_color='#1a3a6e',opacity=0.7))
+    fig1.add_trace(go.Bar(name='Actual',x=cx['actual'],y=cx['complex'],
+        orientation='h',marker_color='#c9a84c',
+        text=[fmt(v) for v in cx['actual']],textposition='outside',
+        textfont=dict(color='#c8d8f0',size=11)))
+    fig1.update_layout(**dark("Revenue by Complex — Actual vs Budget",height=300),
+        barmode='overlay',
         xaxis=dict(title="Revenue (USD)",tickprefix="$",tickformat=",.0f",
                    gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
-        yaxis=dict(tickfont=dict(color='#c8d8f0')))
+        yaxis=dict(tickfont=dict(color='#c8d8f0')),
+        margin=dict(l=140,r=80,t=50,b=40))
 
-    # ── 3. Daily Revenue Trend ─────────────────────────────────
-    daily = dff.groupby('date').agg(
-        actual=('actual_revenue_usd','sum'),
-        budget=('budget_usd','sum')
-    ).reset_index()
+    # 2. Revenue by Brand
+    br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd',ascending=True)
+    fig2 = go.Figure(go.Bar(
+        x=br['actual_revenue_usd'],y=br['brand'],orientation='h',
+        marker_color=COLORS[:len(br)],
+        text=[fmt(v) for v in br['actual_revenue_usd']],textposition='outside',
+        textfont=dict(color='#c8d8f0',size=11)))
+    fig2.update_layout(**dark("Revenue by Brand",height=280),
+        xaxis=dict(title="Revenue (USD)",tickprefix="$",tickformat=",.0f",
+                   gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
+        yaxis=dict(tickfont=dict(color='#c8d8f0')),
+        margin=dict(l=140,r=80,t=50,b=40))
 
+    # 3. Daily trend
+    daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
     fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(x=daily['date'],y=daily['budget'],name='Budget',
-        line=dict(color='#1a3a6e',width=1.5,dash='dot'),mode='lines'))
-    fig3.add_trace(go.Scatter(x=daily['date'],y=daily['actual'],name='Actual',
-        line=dict(color='#c9a84c',width=2.5),mode='lines',
+    fig3.add_trace(go.Scatter(x=daily['date'],y=daily['actual_revenue_usd'],
+        name='Actual',line=dict(color='#c9a84c',width=2.5),
         fill='tozeroy',fillcolor='rgba(201,168,76,0.08)'))
-    fig3.update_layout(**dark("Daily Revenue Trend — Actual vs Budget",height=360,
-        margin=dict(l=70,r=40,t=50,b=50),hovermode='x unified'),
+    fig3.update_layout(**dark("Daily Revenue Trend",height=360),
         xaxis=dict(title="Date",gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
         yaxis=dict(title="Revenue (USD)",tickprefix="$",tickformat=",.0f",
-                   gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')))
-
-    # ── 4. Avg Spend Per Customer ──────────────────────────────
-    avs = dff[dff['customer_count']>0].groupby('complex').apply(
-        lambda x: (x['actual_revenue_usd'].sum()/x['customer_count'].sum())
-    ).reset_index(name='avg_spend').sort_values('avg_spend',ascending=True)
-
-    fig4 = go.Figure(go.Bar(
-        x=avs['avg_spend'],y=avs['complex'],orientation='h',
-        marker_color='#2ecc71',
-        text=[f"${v:.2f}" for v in avs['avg_spend']],
-        textposition='outside',textfont=dict(color='#c8d8f0',size=11)
-    ))
-    fig4.update_layout(**dark("Avg Spend Per Customer by Complex",height=280,
-        margin=dict(l=140,r=80,t=50,b=40)),
-        xaxis=dict(title="Avg Spend (USD)",tickprefix="$",tickformat=",.2f",
                    gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
-        yaxis=dict(tickfont=dict(color='#c8d8f0')))
+        margin=dict(l=70,r=40,t=50,b=50),hovermode='x unified',showlegend=False)
 
-    # ── 5. Budget Achievement Heatmap ─────────────────────────
-    heat = dff.groupby(['complex','brand']).apply(
-        lambda x: (x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100)
-        if x['budget_usd'].sum()>0 else 0
-    ).reset_index(name='achievement')
-    heat_pivot = heat.pivot(index='complex',columns='brand',values='achievement')
+    # 4. Avg spend per customer
+    if 'customer_count' in dff.columns:
+        avs = dff[dff['customer_count']>0].groupby('complex').apply(
+            lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()
+        ).reset_index(name='avg').sort_values('avg',ascending=True)
+        fig4 = go.Figure(go.Bar(
+            x=avs['avg'],y=avs['complex'],orientation='h',
+            marker_color='#2ecc71',
+            text=[f"${v:.2f}" for v in avs['avg']],textposition='outside',
+            textfont=dict(color='#c8d8f0',size=11)))
+        fig4.update_layout(**dark("Avg Spend Per Customer by Complex",height=280),
+            xaxis=dict(title="Avg Spend (USD)",tickprefix="$",tickformat=",.2f",
+                       gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
+            yaxis=dict(tickfont=dict(color='#c8d8f0')),
+            margin=dict(l=140,r=80,t=50,b=40))
+    else:
+        fig4 = go.Figure().update_layout(**dark("Avg Spend (no customer data)",height=280))
 
-    fig5 = go.Figure(go.Heatmap(
-        z=heat_pivot.values,
-        x=heat_pivot.columns.tolist(),
-        y=heat_pivot.index.tolist(),
-        colorscale=[[0,'#c0392b'],[0.8,'#f39c12'],[1,'#2ecc71']],
-        zmid=100, zmin=70, zmax=120,
-        text=[[f"{v:.1f}%" for v in row] for row in heat_pivot.values],
-        texttemplate="%{text}",
-        textfont=dict(color='white',size=12),
-        colorbar=dict(tickfont=dict(color='#c8d8f0'),title=dict(text='%',font=dict(color='#c8d8f0')))
-    ))
-    fig5.update_layout(**dark("Budget Achievement % — Complex × Brand",height=280,
-        margin=dict(l=130,r=60,t=50,b=80)),
-        xaxis=dict(tickfont=dict(color='#c8d8f0'),tickangle=15),
-        yaxis=dict(tickfont=dict(color='#c8d8f0')))
+    # 5. Budget achievement heatmap
+    if 'budget_usd' in dff.columns:
+        heat = dff.groupby(['complex','brand']).apply(
+            lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100
+            if x['budget_usd'].sum()>0 else 0
+        ).reset_index(name='ach')
+        try:
+            pivot = heat.pivot(index='complex',columns='brand',values='ach')
+            fig5 = go.Figure(go.Heatmap(
+                z=pivot.values,x=pivot.columns.tolist(),y=pivot.index.tolist(),
+                colorscale=[[0,'#c0392b'],[0.8,'#f39c12'],[1,'#2ecc71']],
+                zmid=100,zmin=70,zmax=120,
+                text=[[f"{v:.1f}%" for v in row] for row in pivot.values],
+                texttemplate="%{text}",textfont=dict(color='white',size=12),
+                colorbar=dict(tickfont=dict(color='#c8d8f0'))))
+            fig5.update_layout(**dark("Budget Achievement % — Complex × Brand",height=280),
+                xaxis=dict(tickfont=dict(color='#c8d8f0'),tickangle=15),
+                yaxis=dict(tickfont=dict(color='#c8d8f0')),
+                margin=dict(l=130,r=60,t=50,b=80))
+        except:
+            fig5 = go.Figure().update_layout(**dark("Budget Heatmap",height=280))
+    else:
+        fig5 = go.Figure().update_layout(**dark("Budget data not available",height=280))
 
-    # ── 6. SDLM vs SDLY vs Actual ─────────────────────────────
-    comp = dff.groupby('complex').agg(
-        actual=('actual_revenue_usd','sum'),
-        sdlm=('prior_month_actual','sum'),
-        sdly=('prior_year_actual','sum')
-    ).reset_index()
-
+    # 6. Prior period comparison
+    comp_cols = {'actual':'actual_revenue_usd'}
+    if 'prior_month_actual' in dff.columns:
+        comp_cols['sdlm'] = 'prior_month_actual'
+    if 'prior_year_actual' in dff.columns:
+        comp_cols['sdly'] = 'prior_year_actual'
+    comp = dff.groupby('complex')[list(comp_cols.values())].sum().reset_index()
     fig6 = go.Figure()
-    for col,name,color in [
-        ('sdly','Prior Year','#4a6a9e'),
-        ('sdlm','Prior Month','#7fb3d3'),
-        ('actual','This Period','#c9a84c'),
-    ]:
-        fig6.add_trace(go.Bar(
-            name=name, x=comp['complex'], y=comp[col],
-            marker_color=color,
-            text=[fmt(v) for v in comp[col]],
-            textposition='outside',textfont=dict(color='#c8d8f0',size=10)
-        ))
-    fig6.update_layout(**dark("Period Comparison — Actual vs Prior Month vs Prior Year",height=340,
-        margin=dict(l=60,r=40,t=50,b=60),barmode='group',hovermode='x unified'),
+    color_map = {'sdly':'#4a6a9e','sdlm':'#7fb3d3','actual':'#c9a84c'}
+    label_map = {'sdly':'Prior Year','sdlm':'Prior Month','actual':'This Period'}
+    for key, col in comp_cols.items():
+        if col in comp.columns:
+            fig6.add_trace(go.Bar(name=label_map[key],x=comp['complex'],y=comp[col],
+                marker_color=color_map[key],
+                text=[fmt(v) for v in comp[col]],textposition='outside',
+                textfont=dict(color='#c8d8f0',size=10)))
+    fig6.update_layout(**dark("Actual vs Prior Month vs Prior Year",height=340),
+        barmode='group',hovermode='x unified',
         xaxis=dict(tickfont=dict(color='#c8d8f0')),
         yaxis=dict(title="Revenue (USD)",tickprefix="$",tickformat=",.0f",
-                   gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')))
+                   gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),
+        margin=dict(l=60,r=40,t=50,b=60))
 
     return fig1, fig2, fig3, fig4, fig5, fig6
 
 
 # ═══════════════════════════════════════════════════════════════
-# TAB 2 — FORECASTING
+# TAB 2 — FORECAST
 # ═══════════════════════════════════════════════════════════════
 
-def generate_forecast(segment_type, segment_name, horizon):
+def generate_forecast(seg_type, seg_name, horizon):
     df = get_df()
     if df.empty:
-        return go.Figure().update_layout(**dark("No data available")), ""
-
+        fig = go.Figure().update_layout(**dark("No data available"))
+        return fig, "No data loaded."
     horizon = int(horizon)
-
-    # Filter segment
-    if segment_type == 'Overall':
+    if seg_type == 'Overall':
         seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-    elif segment_type == 'By Complex':
-        seg = df[df['complex']==segment_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-    elif segment_type == 'By Brand':
-        seg = df[df['brand']==segment_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-    else:  # Complex × Brand
-        parts = segment_name.split(' | ')
+    elif seg_type == 'By Complex':
+        seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+    elif seg_type == 'By Brand':
+        seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+    else:
+        parts = seg_name.split(' | ')
         if len(parts)==2:
             seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index()
         else:
             seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-
     seg.columns = ['date','revenue']
     seg = seg.sort_values('date').reset_index(drop=True)
-
     if len(seg) < 7:
-        return go.Figure().update_layout(**dark("Insufficient data for forecast (need 7+ days)")), ""
-
-    # ── Moving average forecast ────────────────────────────────
+        fig = go.Figure().update_layout(**dark("Insufficient data (need 7+ days)"))
+        return fig, "Need at least 7 days of data for forecasting."
     last_date = seg['date'].max()
-    ma7  = seg['revenue'].tail(7).mean()
-    ma14 = seg['revenue'].tail(14).mean() if len(seg)>=14 else ma7
-    ma30 = seg['revenue'].tail(30).mean() if len(seg)>=30 else ma7
-
-    # Choose MA based on horizon
-    if horizon <= 7:   base_avg = ma7
-    elif horizon <= 14: base_avg = ma14
-    else:               base_avg = ma30
-
-    # Apply growth rate and DOW seasonality
-    forecast_dates  = [last_date + timedelta(days=i+1) for i in range(horizon)]
-    DOW_MULT = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
-    forecast_values = [round(base_avg * DOW_MULT[d.weekday()] * (1+GROWTH_RATE), 2)
-                       for d in forecast_dates]
-
-    # Confidence band ±15%
-    upper = [v*1.15 for v in forecast_values]
-    lower = [v*0.85 for v in forecast_values]
-
+    if horizon <= 7:   base = seg['revenue'].tail(7).mean()
+    elif horizon <= 14: base = seg['revenue'].tail(14).mean() if len(seg)>=14 else seg['revenue'].mean()
+    else:               base = seg['revenue'].tail(30).mean() if len(seg)>=30 else seg['revenue'].mean()
+    DOW = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
+    fc_dates = [last_date + timedelta(days=i+1) for i in range(horizon)]
+    fc_vals  = [round(base * DOW[d.weekday()] * (1+GROWTH_RATE), 2) for d in fc_dates]
+    upper = [v*1.15 for v in fc_vals]
+    lower = [v*0.85 for v in fc_vals]
     fig = go.Figure()
-
-    # Historical
+    fig.add_trace(go.Scatter(x=seg['date'],y=seg['revenue'],
+        name='Historical',line=dict(color='#4a7aae',width=1.2),opacity=0.85))
     fig.add_trace(go.Scatter(
-        x=seg['date'], y=seg['revenue'],
-        name='Historical Revenue',
-        line=dict(color='#4a7aae',width=1.2),
-        mode='lines', opacity=0.85
-    ))
-
-    # Confidence band
-    fig.add_trace(go.Scatter(
-        x=forecast_dates+forecast_dates[::-1],
-        y=upper+lower[::-1],
-        fill='toself', fillcolor='rgba(201,168,76,0.18)',
-        line=dict(color='rgba(255,255,255,0)'),
-        name='Confidence Band', hoverinfo='skip'
-    ))
-
-    # Forecast line
-    fig.add_trace(go.Scatter(
-        x=forecast_dates, y=forecast_values,
-        name=f'{horizon}-Day Forecast',
-        line=dict(color='#c9a84c',width=2.5,dash='dash'),
-        mode='lines+markers',
-        marker=dict(size=4,color='#c9a84c')
-    ))
-
-    # Forecast start line
-    fig.add_vline(x=last_date, line_dash='dot', line_color='#c9a84c', opacity=0.7)
-    fig.add_annotation(x=last_date, y=1, yref='paper',
-        text='▶ Forecast', showarrow=False,
-        font=dict(color='#c9a84c',size=11), xanchor='left',
-        bgcolor='rgba(10,22,40,0.75)', borderpad=3)
-
-    layout = dark(f"{segment_name} — {horizon}-Day Revenue Forecast", height=480)
+        x=fc_dates+fc_dates[::-1],y=upper+lower[::-1],
+        fill='toself',fillcolor='rgba(201,168,76,0.18)',
+        line=dict(color='rgba(0,0,0,0)'),name='Confidence ±15%',hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=fc_dates,y=fc_vals,
+        name=f'{horizon}-Day Forecast',line=dict(color='#c9a84c',width=2.5,dash='dash'),
+        mode='lines+markers',marker=dict(size=4,color='#c9a84c')))
+    fig.add_vline(x=last_date,line_dash='dot',line_color='#c9a84c',opacity=0.6)
+    layout = dark(f"{seg_name} — {horizon}-Day Forecast",height=480)
     layout['xaxis'] = dict(title='Date',gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0'))
     layout['yaxis'] = dict(title='Revenue (USD)',tickprefix='$',tickformat=',.0f',
                            gridcolor='#1a3a6e',tickfont=dict(color='#c8d8f0'))
@@ -380,32 +338,24 @@ def generate_forecast(segment_type, segment_name, horizon):
                              borderwidth=1,font=dict(color='#c8d8f0'))
     layout['margin'] = dict(l=70,r=30,t=70,b=50)
     fig.update_layout(**layout)
-
-    total = sum(forecast_values)
-    avg   = total/horizon
-    peak  = max(forecast_values)
-    peak_d= forecast_dates[forecast_values.index(peak)].strftime('%b %d, %Y')
-    low   = min(forecast_values)
-    low_d = forecast_dates[forecast_values.index(low)].strftime('%b %d, %Y')
-
-    note = "7-day" if horizon<=7 else ("14-day" if horizon<=14 else "30-day")
-    summary = f"""**{horizon}-Day Forecast — {segment_name}**
+    total = sum(fc_vals); avg = total/horizon
+    peak  = max(fc_vals); peak_d = fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
+    note = "7-day" if horizon<=7 else "14-day" if horizon<=14 else "30-day"
+    summary = f"""**{horizon}-Day Forecast — {seg_name}**
 
 | Metric | Value |
 |---|---|
-| Forecast Method | **{note} moving average × {(1+GROWTH_RATE):.0%} growth + DOW adjustment** |
-| Predicted Total Revenue | **${total:,.2f}** |
-| Average Daily Revenue | **${avg:,.2f}** |
+| Method | **{note} moving average × {1+GROWTH_RATE:.0%} growth + DOW adjustment** |
+| Predicted Total | **${total:,.2f}** |
+| Average Daily | **${avg:,.2f}** |
 | Peak Day | **${peak:,.2f}** on {peak_d} |
-| Lowest Day | **${low:,.2f}** on {low_d} |
-| Forecast Period | {forecast_dates[0].strftime('%b %d')} → {forecast_dates[-1].strftime('%b %d, %Y')} |
-| Confidence Band | **±15%** around central forecast |
+| Period | {fc_dates[0].strftime('%b %d')} → {fc_dates[-1].strftime('%b %d, %Y')} |
 
-> *Weekend days forecast higher due to day-of-week adjustment. Budget growth rate: {GROWTH_RATE:.0%}.*
+> *Confidence band: ±15%. Weekend days forecast higher via day-of-week multiplier.*
 """
     return fig, summary
 
-def update_forecast_segments(seg_type):
+def update_seg_choices(seg_type):
     if seg_type == 'Overall':
         return gr.update(choices=['All Complexes & Brands'],value='All Complexes & Brands')
     elif seg_type == 'By Complex':
@@ -418,235 +368,149 @@ def update_forecast_segments(seg_type):
 
 
 # ═══════════════════════════════════════════════════════════════
-# TAB 3 — INTELLIGENCE CHAT
+# TAB 3 — CHAT (deterministic router + GPT)
 # ═══════════════════════════════════════════════════════════════
 
-# ── Deterministic query functions ─────────────────────────────
-def q_total_revenue(period_days=None):
+def q_total():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    d = df.copy()
-    if period_days:
-        cutoff = d['date'].max() - timedelta(days=period_days)
-        d = d[d['date']>=cutoff]
-    total = d['actual_revenue_usd'].sum()
-    return f"Total revenue: ${total:,.2f}"
+    if df.empty: return "No data loaded."
+    return f"Total revenue: ${df['actual_revenue_usd'].sum():,.2f}"
 
 def q_top_complex():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    top = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
-    val = df.groupby('complex')['actual_revenue_usd'].sum().max()
-    return f"Top complex: {top} with ${val:,.2f}"
+    if df.empty: return "No data loaded."
+    g = df.groupby('complex')['actual_revenue_usd'].sum()
+    return f"Top complex: {g.idxmax()} at {fmt(g.max())}"
 
 def q_top_brand():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    top = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
-    val = df.groupby('brand')['actual_revenue_usd'].sum().max()
-    return f"Top brand: {top} with ${val:,.2f}"
+    if df.empty: return "No data loaded."
+    g = df.groupby('brand')['actual_revenue_usd'].sum()
+    return f"Top brand: {g.idxmax()} at {fmt(g.max())}"
 
-def q_underperforming(threshold=0.80):
+def q_underperforming():
     df = get_df()
-    if df.empty: return "No data loaded yet."
+    if df.empty: return "No data loaded."
+    if 'budget_usd' not in df.columns: return "Budget data not available."
     latest = df['date'].max()
     recent = df[df['date'] >= latest - timedelta(days=7)]
     perf = recent.groupby(['complex','brand']).apply(
         lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()
         if x['budget_usd'].sum()>0 else 1
-    ).reset_index(name='achievement')
-    under = perf[perf['achievement']<threshold]
-    if under.empty:
-        return "No underperforming sites in the last 7 days — all complexes/brands above 80% of budget."
-    lines = [f"- {r.complex} / {r.brand}: {r.achievement*100:.1f}% of budget" for r in under.itertuples()]
-    return "Underperforming (below 80% budget, last 7 days):\n" + "\n".join(lines)
+    ).reset_index(name='ach')
+    under = perf[perf['ach']<0.80]
+    if under.empty: return "No sites below 80% budget in last 7 days."
+    lines = [f"- {r.complex} / {r.brand}: {r.ach*100:.1f}% of budget" for r in under.itertuples()]
+    return "Below 80% budget (last 7 days):\n" + "\n".join(lines)
 
 def q_avg_spend():
     df = get_df()
-    if df.empty: return "No data loaded yet."
+    if df.empty: return "No data loaded."
+    if 'customer_count' not in df.columns: return "Customer data not available."
     avs = df[df['customer_count']>0].groupby('complex').apply(
         lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()
-    ).reset_index(name='avg')
-    lines = [f"- {r.complex}: ${r.avg:.2f}/customer" for r in avs.sort_values('avg',ascending=False).itertuples()]
-    return "Average spend per customer by complex:\n" + "\n".join(lines)
+    ).sort_values(ascending=False)
+    return "Avg spend per customer:\n" + "\n".join([f"- {cx}: ${v:.2f}" for cx,v in avs.items()])
 
-def q_sdlm_comparison():
+def q_sdlm():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    total_act  = df['actual_revenue_usd'].sum()
-    total_sdlm = df['prior_month_actual'].sum()
-    if total_sdlm == 0:
-        return "Prior month data not yet available — need 30+ days of history."
-    diff = total_act - total_sdlm
-    pct  = diff/total_sdlm*100
-    return f"vs Prior Month (SDLM): ${total_act:,.2f} vs ${total_sdlm:,.2f} — {'+' if diff>=0 else ''}{diff:,.2f} ({pct:+.1f}%)"
+    if df.empty: return "No data loaded."
+    if 'prior_month_actual' not in df.columns: return "Prior month data not available."
+    act = df['actual_revenue_usd'].sum(); pm = df['prior_month_actual'].sum()
+    if pm==0: return "Prior month data is zero — may need 30+ days of history."
+    return f"vs Prior Month: ${act:,.2f} vs ${pm:,.2f} — {(act-pm)/pm*100:+.1f}%"
 
-def q_sdly_comparison():
+def q_sdly():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    total_act  = df['actual_revenue_usd'].sum()
-    total_sdly = df['prior_year_actual'].sum()
-    if total_sdly == 0:
-        return "Prior year data not yet available — need 365+ days of history."
-    diff = total_act - total_sdly
-    pct  = diff/total_sdly*100
-    return f"vs Prior Year (SDLY): ${total_act:,.2f} vs ${total_sdly:,.2f} — {'+' if diff>=0 else ''}{diff:,.2f} ({pct:+.1f}%)"
+    if df.empty: return "No data loaded."
+    if 'prior_year_actual' not in df.columns: return "Prior year data not available."
+    act = df['actual_revenue_usd'].sum(); py = df['prior_year_actual'].sum()
+    if py==0: return "Prior year data is zero — needs 365+ days of history."
+    return f"vs Prior Year: ${act:,.2f} vs ${py:,.2f} — {(act-py)/py*100:+.1f}%"
 
 def q_best_day():
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    dow_rev = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
-    best    = dow_rev.idxmax()
-    return f"Best revenue day of week: {best} (avg ${dow_rev[best]:,.2f}/day)"
+    if df.empty: return "No data loaded."
+    dow = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
+    return f"Best day of week: {dow.idxmax()} (avg ${dow.max():,.2f})"
 
-def q_holiday_impact():
+def q_moving_avg(days=7):
     df = get_df()
-    if df.empty: return "No data loaded yet."
-    if 'is_holiday' not in df.columns:
-        return "Holiday data not available."
-    hol  = df[df['is_holiday']==1]['actual_revenue_usd'].mean()
-    norm = df[df['is_holiday']==0]['actual_revenue_usd'].mean()
-    if hol==0: return "No holiday data recorded yet."
-    diff = (hol-norm)/norm*100
-    return f"Holiday vs normal day: ${hol:,.2f} vs ${norm:,.2f} avg per row ({diff:+.1f}%)"
-
-def q_moving_average(days=7):
-    df = get_df()
-    if df.empty: return "No data loaded yet."
+    if df.empty: return "No data loaded."
     latest = df['date'].max()
-    cutoff = latest - timedelta(days=days)
-    recent = df[df['date']>=cutoff]
-    ma = recent.groupby('date')['actual_revenue_usd'].sum().mean()
+    ma = df[df['date']>=latest-timedelta(days=days)].groupby('date')['actual_revenue_usd'].sum().mean()
     return f"{days}-day moving average daily revenue: ${ma:,.2f}"
 
-def q_complex_brand(cx, brd):
-    df = get_df()
-    sub = df[(df['complex']==cx)&(df['brand']==brd)]
-    if sub.empty: return f"No data for {cx} / {brd}"
-    total = sub['actual_revenue_usd'].sum()
-    avg   = sub['actual_revenue_usd'].mean()
-    bgt   = sub['budget_usd'].sum()
-    ach   = total/bgt*100 if bgt>0 else 0
-    return (f"{cx} / {brd}: ${total:,.2f} total | ${avg:,.2f}/day avg | "
-            f"Budget achievement: {ach:.1f}%")
-
-def q_revenue_per_counter():
-    df = get_df()
-    if df.empty: return "No data loaded yet."
-    rpc = df.groupby('complex').apply(
-        lambda x: x['actual_revenue_usd'].sum()/x['counters_open'].sum()
-        if x['counters_open'].sum()>0 else 0
-    ).reset_index(name='rpc')
-    lines = [f"- {r.complex}: ${r.rpc:,.2f}/counter" for r in rpc.sort_values('rpc',ascending=False).itertuples()]
-    return "Revenue per counter by complex:\n" + "\n".join(lines)
-
-# ── Intent router ──────────────────────────────────────────────
 def route_intent(message):
     df = get_df()
-    if df.empty:
-        return None
+    if df.empty: return None
     m = message.lower()
-    if any(x in m for x in ['underperform','below budget','struggling','worst']):
+    if any(x in m for x in ['underperform','below budget','struggling','worst site']):
         return q_underperforming()
-    if any(x in m for x in ['top complex','best complex','leading complex','highest complex']):
+    if any(x in m for x in ['top complex','best complex','leading complex']):
         return q_top_complex()
-    if any(x in m for x in ['top brand','best brand','leading brand','highest brand']):
+    if any(x in m for x in ['top brand','best brand','leading brand']):
         return q_top_brand()
-    if any(x in m for x in ['avg spend','average spend','spend per customer','per customer']):
+    if any(x in m for x in ['avg spend','average spend','spend per customer']):
         return q_avg_spend()
     if any(x in m for x in ['prior month','sdlm','last month','vs month']):
-        return q_sdlm_comparison()
-    if any(x in m for x in ['prior year','sdly','last year','vs year','year on year','yoy']):
-        return q_sdly_comparison()
-    if any(x in m for x in ['best day','day of week','busiest day','peak day']):
+        return q_sdlm()
+    if any(x in m for x in ['prior year','sdly','last year','yoy','year on year']):
+        return q_sdly()
+    if any(x in m for x in ['best day','busiest day','peak day','day of week']):
         return q_best_day()
-    if any(x in m for x in ['holiday','public holiday']):
-        return q_holiday_impact()
-    if '7-day' in m or '7 day' in m or 'weekly average' in m:
-        return q_moving_average(7)
-    if '30-day' in m or '30 day' in m or 'monthly average' in m:
-        return q_moving_average(30)
-    if any(x in m for x in ['per counter','counter performance','revenue per counter']):
-        return q_revenue_per_counter()
-    if any(x in m for x in ['total revenue','overall revenue','total sales']):
-        return q_total_revenue()
-    # Complex × brand specific
+    if '7-day' in m or '7 day' in m: return q_moving_avg(7)
+    if '30-day' in m or '30 day' in m: return q_moving_avg(30)
+    if any(x in m for x in ['total revenue','overall revenue']): return q_total()
     for cx in COMPLEXES:
-        for brd in BRANDS:
-            if cx.lower() in m and brd.lower() in m:
-                return q_complex_brand(cx, brd)
-    # Complex specific
+        for br in BRANDS:
+            if cx.lower() in m and br.lower() in m:
+                sub = df[(df['complex']==cx)&(df['brand']==br)]
+                if not sub.empty:
+                    return f"{cx} / {br}: ${sub['actual_revenue_usd'].sum():,.2f} total, ${sub['actual_revenue_usd'].mean():,.2f}/day avg"
     for cx in COMPLEXES:
         if cx.lower() in m:
             sub = df[df['complex']==cx]
-            return f"{cx}: ${sub['actual_revenue_usd'].sum():,.2f} total | ${sub['actual_revenue_usd'].mean():,.2f}/day avg"
-    # Brand specific
-    for brd in BRANDS:
-        if brd.lower() in m:
-            sub = df[df['brand']==brd]
-            return f"{brd}: ${sub['actual_revenue_usd'].sum():,.2f} total | ${sub['actual_revenue_usd'].mean():,.2f}/day avg"
+            return f"{cx}: ${sub['actual_revenue_usd'].sum():,.2f} total"
+    for br in BRANDS:
+        if br.lower() in m:
+            sub = df[df['brand']==br]
+            return f"{br}: ${sub['actual_revenue_usd'].sum():,.2f} total"
     return None
 
 def build_system_prompt():
     df = get_df()
     if df.empty:
-        return "You are a QSR intelligence assistant. No data is currently loaded."
-
-    latest  = df['date'].max()
-    total   = df['actual_revenue_usd'].sum()
-    top_cx  = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
-    top_br  = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
-    date_range = f"{df['date'].min().strftime('%b %d, %Y')} to {df['date'].max().strftime('%b %d, %Y')}"
-    ma7 = df[df['date']>=latest-timedelta(days=7)].groupby('date')['actual_revenue_usd'].sum().mean()
-
-    return f"""You are an intelligence assistant for Savanna QSR Group, a multi-site QSR operator in Zimbabwe.
-You have access to daily revenue data from Google Sheets for the period {date_range}.
-
-KEY FACTS:
-- Total revenue on record: ${total:,.2f}
-- Date range: {date_range}
-- Complexes: {', '.join(COMPLEXES)}
-- Brands: {', '.join(BRANDS)}
-- Top complex: {top_cx}
-- Top brand: {top_br}
-- 7-day moving avg daily revenue: ${ma7:,.2f}
-- Budget growth rate: {GROWTH_RATE:.0%} above rolling average
-
-The app uses a Google Sheet with daily data including: actual revenue, budget (DOW-adjusted rolling avg × 5% growth),
-prior month actual (SDLM), prior year actual (SDLY), customer count, counters open.
-
-Answer concisely and professionally. Use $ for all amounts.
-If asked about forecasts, explain the moving average + DOW adjustment + 5% growth methodology.
-If asked about data limitations, be honest — SDLM needs 30+ days, SDLY needs 365+ days of history."""
-
-SYSTEM_PROMPT = build_system_prompt()
+        return "You are a QSR intelligence assistant. No data is currently loaded from Google Sheets."
+    total = df['actual_revenue_usd'].sum()
+    latest = df['date'].max()
+    return f"""You are an intelligence assistant for Savanna QSR Group, Zimbabwe.
+Data loaded: {df['date'].min().strftime('%b %d, %Y')} to {latest.strftime('%b %d, %Y')} ({len(df)} rows).
+Total revenue on record: ${total:,.2f}
+Complexes: {', '.join(COMPLEXES)}
+Brands: {', '.join(BRANDS)}
+Answer concisely and professionally. Use $ for amounts."""
 
 def chat(message, history):
-    # Try deterministic router first
+    if not message or not message.strip():
+        return ""
     data_answer = route_intent(message)
-
-    messages = [{"role":"system","content":SYSTEM_PROMPT}]
-    if history:
-        for h in history:
-            if isinstance(h,dict):
-                messages.append({"role":h["role"],"content":h["content"]})
-            elif isinstance(h,(list,tuple)) and len(h)==2:
-                if h[0]: messages.append({"role":"user","content":str(h[0])})
-                if h[1]: messages.append({"role":"assistant","content":str(h[1])})
-
-    if data_answer:
-        user_msg = f"{message}\n\n[DATA FROM SYSTEM]: {data_answer}"
-    else:
-        user_msg = message
-
+    system = build_system_prompt()
+    messages = [{"role":"system","content":system}]
+    for h in (history or []):
+        if isinstance(h, dict):
+            messages.append({"role":h["role"],"content":h["content"]})
+        elif isinstance(h,(list,tuple)) and len(h)==2:
+            if h[0]: messages.append({"role":"user","content":str(h[0])})
+            if h[1]: messages.append({"role":"assistant","content":str(h[1])})
+    user_msg = f"{message}\n\n[DATA]: {data_answer}" if data_answer else message
     messages.append({"role":"user","content":user_msg})
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",messages=messages,temperature=0.2,max_tokens=600
-        )
+            model="gpt-4o-mini",messages=messages,temperature=0.2,max_tokens=600)
         return resp.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Error: {e}"
+        return f"⚠️ {e}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -659,57 +523,41 @@ body,.gradio-container{background:#050d1a!important;font-family:Arial,sans-serif
 button[class*="tab-"]{color:#7fb3d3!important;background:transparent!important;
   border:none!important;border-bottom:3px solid transparent!important;
   padding:10px 18px!important;font-size:13px!important;font-weight:500!important;}
-button[class*="tab-"]:hover{color:#ffffff!important;}
-button[class*="tab-"][class*="selected"],button[class*="tab-"].selected,
+button[class*="tab-"]:hover{color:#fff!important;}
+button[class*="tab-"][class*="selected"],
 div[role="tablist"] button[aria-selected="true"]{
   color:#c9a84c!important;border-bottom:3px solid #c9a84c!important;font-weight:700!important;}
 .gradio-container *{color:#c8d8f0;}
-.gradio-container input,.gradio-container textarea,.gradio-container select{
-  background:#0a1628!important;color:#c8d8f0!important;border:1px solid #1a3a6e!important;border-radius:6px!important;}
+.gradio-container input,.gradio-container textarea{
+  background:#0a1628!important;color:#c8d8f0!important;
+  border:1px solid #1a3a6e!important;border-radius:6px!important;}
 ul[role="listbox"]{background:#0d1b2a!important;border:1px solid #c9a84c!important;border-radius:6px!important;}
 ul[role="listbox"] li{color:#fff!important;background:#0d1b2a!important;}
 ul[role="listbox"] li:hover,ul[role="listbox"] li[aria-selected="true"]{background:#c9a84c!important;color:#0d1b2a!important;}
 button.primary,button[variant="primary"]{background:#c9a84c!important;color:#0a1628!important;
   font-weight:700!important;border:none!important;border-radius:6px!important;}
 button.primary:hover{background:#e0be6a!important;}
+button.secondary,button[variant="secondary"]{background:#1a3a6e!important;
+  color:#c8d8f0!important;border:1px solid #c9a84c!important;border-radius:6px!important;}
 .gradio-container .block,.gradio-container .form,.gradio-container .panel{
   background:#0a1628!important;border:1px solid #1a3a6e!important;border-radius:8px!important;}
 .gradio-container label,.gradio-container .label-wrap span{color:#a8c8f0!important;}
-.message.user>div,div[data-testid="user"]>div{
-  background:linear-gradient(135deg,#1e2d5e,#162d5a)!important;color:#e8f0ff!important;
-  border-radius:18px 18px 4px 18px!important;border:1px solid #2a4a8a!important;}
-.message.bot>div,div[data-testid="bot"]>div{
-  background:linear-gradient(135deg,#0a1e3d,#112952)!important;color:#fff!important;
-  border-radius:18px 18px 18px 4px!important;}
+input[type="radio"]{accent-color:#c9a84c!important;}
 div[class*="chatbot"],.chatbot{background:#040c1a!important;border-radius:12px!important;}
 .gradio-container .prose{color:#c8d8f0!important;}
 .gradio-container .prose strong{color:#c9a84c!important;}
-.gradio-container .prose table{border-color:#1a3a6e!important;}
 .gradio-container .prose th{background:#0a1628!important;color:#c9a84c!important;}
-.gradio-container .prose td{border-color:#1a3a6e!important;color:#c8d8f0!important;}
+.gradio-container .prose td{border-color:#1a3a6e!important;}
 ::-webkit-scrollbar{width:6px;height:6px;}
 ::-webkit-scrollbar-thumb{background:#c9a84c;border-radius:4px;}
 footer{display:none!important;}
 """
 
-def get_kpis():
-    df = get_df()
-    if df.empty:
-        return "No data loaded", "—", "—", "—", "—"
-    latest    = df['date'].max()
-    total_rev = df['actual_revenue_usd'].sum()
-    total_bud = df['budget_usd'].sum()
-    ach       = total_rev/total_bud*100 if total_bud else 0
-    top_cx    = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
-    top_br    = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
-    ma7       = df[df['date']>=latest-timedelta(days=7)].groupby('date')['actual_revenue_usd'].sum().mean()
-    date_rng  = f"{df['date'].min().strftime('%b %d')} – {latest.strftime('%b %d, %Y')}"
-    return date_rng, fmt(total_rev), f"{ach:.1f}%", top_cx, top_br
+date_rng, total_rev, ach_pct, top_cx, top_br = get_kpis()
 
 with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as demo:
 
-    date_rng, total_rev, ach_pct, top_cx, top_br = get_kpis()
-
+    # Header
     gr.HTML(f"""
     <div style="background:linear-gradient(135deg,#0d1b2a,#1a3a5c);
                 padding:18px 28px 16px;border-radius:12px;margin-bottom:4px;
@@ -746,7 +594,7 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as
                 <div style="color:#7fb3d3;font-size:11px;">Top Brand</div>
             </div>
             <div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;">
-                <div style="color:#7fb3d3;font-size:18px;font-weight:700;">{date_rng}</div>
+                <div style="color:#7fb3d3;font-size:16px;font-weight:700;">{date_rng}</div>
                 <div style="color:#7fb3d3;font-size:11px;">Data Range</div>
             </div>
         </div>
@@ -754,35 +602,34 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as
 
     with gr.Tabs():
 
-        # ── Tab 1: Dashboard ──────────────────────────────────
+        # ── Dashboard ──────────────────────────────────────────
         with gr.TabItem("📊 Dashboard"):
             with gr.Row():
-                period_sel = gr.Radio(
+                period_sel  = gr.Radio(
                     choices=['Last 7 Days','Last 30 Days','Last 90 Days','MTD','All Time'],
                     value='All Time', label="Period"
                 )
-                with gr.Column(scale=0):
-                    dash_btn     = gr.Button("📊 Load Dashboard", variant="primary")
-                    refresh_btn  = gr.Button("🔄 Refresh Data",   variant="secondary")
-                    refresh_msg  = gr.Markdown()
+                with gr.Column(scale=0, min_width=200):
+                    dash_btn    = gr.Button("📊 Load Dashboard", variant="primary")
+                    refresh_btn = gr.Button("🔄 Refresh Data",   variant="secondary")
+                    refresh_msg = gr.Markdown()
 
             with gr.Row():
-                ch_cx  = gr.Plot(show_label=False)
-                ch_br  = gr.Plot(show_label=False)
+                ch1 = gr.Plot(show_label=False)
+                ch2 = gr.Plot(show_label=False)
             with gr.Row():
-                ch_trend = gr.Plot(show_label=False)
-                ch_avs   = gr.Plot(show_label=False)
+                ch3 = gr.Plot(show_label=False)
+                ch4 = gr.Plot(show_label=False)
             with gr.Row():
-                ch_heat  = gr.Plot(show_label=False)
-                ch_comp  = gr.Plot(show_label=False)
+                ch5 = gr.Plot(show_label=False)
+                ch6 = gr.Plot(show_label=False)
 
-            dash_btn.click(build_dashboard,[period_sel],
-                           [ch_cx,ch_br,ch_trend,ch_avs,ch_heat,ch_comp])
+            dash_btn.click(build_dashboard,[period_sel],[ch1,ch2,ch3,ch4,ch5,ch6])
             refresh_btn.click(refresh_data,[],[refresh_msg])
 
-        # ── Tab 2: Forecast ───────────────────────────────────
+        # ── Forecast ───────────────────────────────────────────
         with gr.TabItem("📈 Forecast"):
-            gr.HTML("<p style='color:#7fb3d3;font-size:12px;margin:10px 0 14px;'>Forecasts use day-of-week adjusted moving averages with 5% growth factor.</p>")
+            gr.HTML("<p style='color:#7fb3d3;font-size:12px;margin:10px 0 14px;'>Day-of-week adjusted moving average with 5% growth factor.</p>")
             with gr.Row():
                 seg_type = gr.Radio(
                     choices=['Overall','By Complex','By Brand','Complex × Brand'],
@@ -791,18 +638,18 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as
                 seg_name = gr.Dropdown(
                     choices=['All Complexes & Brands'],
                     value='All Complexes & Brands',
-                    label="Select Segment", interactive=True
+                    label="Segment", interactive=True
                 )
-                horizon = gr.Radio(choices=[7,14,30,60], value=30, label="Horizon (days)")
-                fc_btn  = gr.Button("⚡ Generate Forecast", variant="primary")
+                horizon  = gr.Radio(choices=[7,14,30,60], value=30, label="Horizon (days)")
+                fc_btn   = gr.Button("⚡ Generate", variant="primary")
 
             fc_chart   = gr.Plot(show_label=False)
             fc_summary = gr.Markdown()
 
-            seg_type.change(update_forecast_segments,[seg_type],[seg_name])
+            seg_type.change(update_seg_choices,[seg_type],[seg_name])
             fc_btn.click(generate_forecast,[seg_type,seg_name,horizon],[fc_chart,fc_summary])
 
-        # ── Tab 3: Chat ───────────────────────────────────────
+        # ── Chat ───────────────────────────────────────────────
         with gr.TabItem("💬 Intelligence Chat"):
             gr.HTML("""
             <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:8px;
@@ -810,29 +657,37 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=css) as
                 <p style="color:#c9a84c;font-weight:700;margin:0 0 6px;font-size:13px;">
                     💡 Ask anything about Savanna QSR Group operations
                 </p>
-                <p style="color:#7fb3d3;font-size:12px;margin:0;line-height:1.8;">
-                    "Which complex is underperforming?" &nbsp;·&nbsp;
-                    "What is the avg spend per customer?" &nbsp;·&nbsp;
-                    "Compare Westgate Mall vs City Centre" &nbsp;·&nbsp;
-                    "How is Flame & Grill trending vs prior month?" &nbsp;·&nbsp;
-                    "What is the 7-day moving average?"
+                <p style="color:#7fb3d3;font-size:12px;margin:0;">
+                    Try: "Which complex is underperforming?" · "Avg spend per customer?" ·
+                    "Compare Westgate vs City Centre" · "7-day moving average?"
                 </p>
             </div>""")
-            chatbot = gr.ChatInterface(
-                fn=chat, title="", type="messages",
-                examples=[
-                    "Which complex is underperforming this week?",
-                    "What is the average spend per customer by complex?",
-                    "Which brand generates the most revenue?",
-                    "How does this period compare to prior month?",
-                    "What is the 7-day moving average daily revenue?",
-                    "Which day of the week has the highest revenue?",
-                    "Compare Westgate Mall and City Centre performance",
-                    "What is the revenue per counter for each complex?",
-                    "How did holidays affect revenue?",
-                    "Which complex should we prioritize for investment?",
-                ]
-            )
+
+            chatbot_box = gr.Chatbot(height=420, type="messages", show_label=False)
+
+            with gr.Row():
+                chat_input = gr.Textbox(
+                    placeholder="Ask a question about Savanna QSR operations...",
+                    show_label=False, scale=9, container=False
+                )
+                chat_send = gr.Button("Send ➤", variant="primary", scale=1)
+
+            def respond(message, history):
+                if not message or not message.strip():
+                    return history or [], ""
+                reply = chat(message, history or [])
+                h = list(history or [])
+                h.append({"role":"user",     "content": message})
+                h.append({"role":"assistant","content": reply})
+                return h, ""
+
+            chat_send.click(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
+            chat_input.submit(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
+
+            gr.HTML("""
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                <span style="color:#7fb3d3;font-size:11px;padding-top:4px;">Try:</span>
+            </div>""")
 
     gr.HTML("""
     <div style="text-align:center;margin-top:16px;padding:12px;border-top:1px solid #1a3a6e;">
