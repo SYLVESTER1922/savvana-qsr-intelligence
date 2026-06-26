@@ -1,5 +1,5 @@
 ---
-title: Savanna QSR Intelligence
+title: Savvana QSR Intelligence
 emoji: 🍔
 colorFrom: blue
 colorTo: yellow
@@ -12,6 +12,4 @@ pinned: false
 # 🍔 Savanna QSR Intelligence
 
 Live operations intelligence for Savanna QSR Group, Zimbabwe.
-Data flows daily from Google Sheets → Python analytics → AI-powered chat.
-
 Built by [Netrisyl Insights](https://netrisyl.com)
