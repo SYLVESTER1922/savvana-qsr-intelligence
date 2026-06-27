@@ -1,6 +1,6 @@
-openai
-neo4j
+gradio==4.44.1
 pandas
-python-dotenv
+numpy
 plotly
+openai
 supabase
