@@ -5,7 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 from openai import OpenAI
 from datetime import datetime, timedelta
-from supabase import create_client, Client
+import requests as _http
 warnings.filterwarnings('ignore')
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -16,13 +16,15 @@ COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
 BRANDS = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
 COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+# direct REST
 def load_data():
-    if not supabase: print("SUPABASE not configured"); return pd.DataFrame()
+    if not SUPABASE_URL or not SUPABASE_KEY: print("SUPABASE not configured"); return pd.DataFrame()
     try:
-        resp = supabase.table("daily_input").select("*").order("date").execute()
-        if not resp.data: return pd.DataFrame()
-        df = pd.DataFrame(resp.data)
+        r = _http.get(f"{SUPABASE_URL}/rest/v1/daily_input?select=*&order=date", headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}"})
+        if r.status_code!=200: print(f"HTTP {r.status_code}"); return pd.DataFrame()
+        data=r.json()
+        if not data: return pd.DataFrame()
+        df = pd.DataFrame(data)
         for c in ['budget_usd','actual_revenue_usd','prior_month_actual','prior_year_actual','customer_count','counters_open','variance_vs_budget','avg_spend_per_cust','revenue_per_counter','is_holiday','variance_pct','vs_prior_month_pct','vs_prior_year_pct']:
             if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         if 'date' in df.columns: df['date'] = pd.to_datetime(df['date'], errors='coerce')
