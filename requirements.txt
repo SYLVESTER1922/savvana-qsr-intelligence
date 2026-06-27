@@ -1,4 +1,4 @@
 openai
 neo4j
 pandas
-python-dotenvgradio==5.9.1
+python-dotenv
