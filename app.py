@@ -164,8 +164,6 @@ def route_intent(message):
             sub=df[df['brand']==br]; return br+": ${:,.2f}".format(sub['actual_revenue_usd'].sum())
     return None
 def chat(message, history):
-    from openai import OpenAI
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
     if not message or not message.strip(): return ""
     data_answer = route_intent(message); df = get_df()
     system = "You are an intelligence assistant for Savanna QSR Group, Zimbabwe. Data: "+str(len(df))+" rows. Revenue: ${:,.2f}".format(df['actual_revenue_usd'].sum())+". Complexes: "+', '.join(COMPLEXES)+". Brands: "+', '.join(BRANDS)+". Be concise." if not df.empty else "No data loaded."
@@ -174,8 +172,8 @@ def chat(message, history):
         if isinstance(h,dict): messages.append({"role":h["role"],"content":h["content"]})
     messages.append({"role":"user","content":message+"\n\n[DATA]: "+str(data_answer) if data_answer else message})
     try:
-        resp = client.chat.completions.create(model="gpt-4o-mini",messages=messages,temperature=0.2,max_tokens=600)
-        return resp.choices[0].message.content
+        r2 = _http.post("https://api.openai.com/v1/chat/completions", headers={"Authorization":"Bearer "+os.environ.get("OPENAI_API_KEY",""),"Content-Type":"application/json"}, json={"model":"gpt-4o-mini","messages":messages,"temperature":0.2,"max_tokens":600}); resp = r2.json()
+        return resp["choices"][0]["message"]["content"]
     except Exception as e: return "Error: "+str(e)
 css = """
 body,.gradio-container{background:#050d1a!important;font-family:Arial,sans-serif!important;}
