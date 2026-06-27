@@ -1,5 +1,6 @@
-plotly
 openai
 neo4j
 pandas
 python-dotenv
+plotly
+supabase
