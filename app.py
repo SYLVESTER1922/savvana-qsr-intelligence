@@ -3,7 +3,7 @@ import gradio as gr
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from openai import OpenAI
+
 from datetime import datetime, timedelta
 import requests as _http
 warnings.filterwarnings('ignore')
@@ -15,7 +15,7 @@ _cache = {'df': pd.DataFrame(), 'loaded_at': 0}
 COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
 BRANDS = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
 COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
+
 def load_data():
     if not SUPABASE_URL or not SUPABASE_KEY: print("SUPABASE not configured"); return pd.DataFrame()
     try:
@@ -164,6 +164,8 @@ def route_intent(message):
             sub=df[df['brand']==br]; return br+": ${:,.2f}".format(sub['actual_revenue_usd'].sum())
     return None
 def chat(message, history):
+    from openai import OpenAI
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""))
     if not message or not message.strip(): return ""
     data_answer = route_intent(message); df = get_df()
     system = "You are an intelligence assistant for Savanna QSR Group, Zimbabwe. Data: "+str(len(df))+" rows. Revenue: ${:,.2f}".format(df['actual_revenue_usd'].sum())+". Complexes: "+', '.join(COMPLEXES)+". Brands: "+', '.join(BRANDS)+". Be concise." if not df.empty else "No data loaded."
