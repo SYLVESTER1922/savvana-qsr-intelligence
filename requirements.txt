@@ -1,3 +1,4 @@
+plotly
 openai
 neo4j
 pandas
