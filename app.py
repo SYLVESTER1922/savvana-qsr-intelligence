@@ -229,3 +229,4 @@ with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
             chat_input.submit(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
     gr.HTML('<div style="text-align:center;margin-top:16px;padding:12px;border-top:1px solid #1a3a6e;"><p style="color:#c9a84c;font-size:11px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:11px;">Data - Analytics - Intelligence</p></div>')
 demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
+
