@@ -18,6 +18,17 @@ try:
     _gcu._json_schema_to_python_type = _safe
 except: pass
 
+# ── Logo — load from file if present, fallback to text ───────────────────────
+def _load_logo_html():
+    import base64, pathlib
+    for path in [pathlib.Path(__file__).parent / "NI_logo.png",
+                 pathlib.Path("NI_logo.png")]:
+        if path.exists():
+            data = base64.b64encode(path.read_bytes()).decode()
+            return f'<img src="data:image/png;base64,{data}" alt="Netrisyl Insights" style="height:56px;width:auto;object-fit:contain;"/>'
+    return ''
+_logo_html = _load_logo_html()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -166,10 +177,7 @@ def build_kpi_html(dff=None):
         <div class="kpi-row">{pills}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
-        <img src="/file=NI_logo.png" alt="Netrisyl Insights"
-             style="height:56px;width:auto;object-fit:contain;"
-             onerror="this.onerror=null;this.src='/file=NI%20logo.png'"
-             onload="this.style.display='block'"/>
+        {_logo_html}
         <div class="ni-label">NETRISYL INSIGHTS</div>
       </div>
     </div>'''
@@ -354,27 +362,29 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         upper = [v*1.15 for v in fc_vals]
         lower = [v*0.85 for v in fc_vals]
         fig = go.Figure()
+        # 1. Confidence band drawn FIRST (background)
+        fig.add_trace(go.Scatter(
+            x=fc_dates+fc_dates[::-1], y=upper+lower[::-1],
+            fill='toself', fillcolor='rgba(201,168,76,0.12)',
+            line=dict(color='rgba(0,0,0,0)'), name='Confidence Band', hoverinfo='skip'))
+        # 2. Historical line ON TOP of confidence band
         fig.add_trace(go.Scatter(x=seg_display['date'], y=seg_display['revenue'],
             name='Historical (last 90d)',
             mode='lines+markers',
-            line=dict(color=C_NAVY, width=2.5),
-            marker=dict(size=4, color=C_NAVY),
-            opacity=0.9,
+            line=dict(color=C_NAVY, width=3),
+            marker=dict(size=5, color=C_NAVY),
             hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Historical</extra>'))
-        fig.add_trace(go.Scatter(
-            x=fc_dates+fc_dates[::-1], y=upper+lower[::-1],
-            fill='toself', fillcolor='rgba(201,168,76,0.15)',
-            line=dict(color='rgba(0,0,0,0)'), name='Confidence Band', hoverinfo='skip'))
+        # 3. Forecast line on top
         fig.add_trace(go.Scatter(x=fc_dates, y=fc_vals, name=f'{h}-Day Forecast',
             line=dict(color=C_GOLD, width=3, dash='dash'), mode='lines+markers',
             marker=dict(size=7, color=C_GOLD, symbol='circle',
-                        line=dict(color=C_NAVY, width=1)),
+                        line=dict(color=C_NAVY, width=1.5)),
             hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Forecast</extra>'))
         fig.add_vline(x=str(last)[:10], line_dash='dot', line_color=C_GOLD, opacity=0.5)
         hist_vals = [v for v in seg_display['revenue'].tolist() if v and not np.isnan(float(v))]
         all_vals = hist_vals + fc_vals + upper
-        y_max = max(all_vals) * 1.15 if all_vals else 1
-        y_min = max(0, min((hist_vals or [0]) + lower) * 0.85)
+        y_max = max(all_vals) * 1.20 if all_vals else 1
+        y_min = 0  # always start from 0 so historical line is never cut off
         layout = dark_layout(f"{label} — {h}-Day Forecast", height=480,
                              margin=dict(l=80,r=40,t=60,b=50))
         layout['hovermode'] = 'x unified'
@@ -384,7 +394,20 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         fig.update_layout(**layout)
         total = sum(fc_vals); avg = total/h
         peak = max(fc_vals); peak_d = fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
-        summary = f"**{h}-Day Forecast — {label}**\n\n| Metric | Value |\n|---|---|\n| Predicted Total | **{fmt(total)}** |\n| Daily Average | **{fmt(avg)}** |\n| Peak Day | **{fmt(peak)}** on {peak_d} |\n| Period | {fc_dates[0].strftime('%b %d')} → {fc_dates[-1].strftime('%b %d, %Y')} |\n\n> *Day-of-week adjusted moving average with 5% growth factor.*"
+        low  = min(fc_vals); low_d  = fc_dates[fc_vals.index(low)].strftime('%b %d, %Y')
+        # Show first 14 days breakdown
+        day_rows = "\n".join([f"| {fc_dates[i].strftime('%a %b %d')} | **{fmt(fc_vals[i])}** |"
+                               for i in range(min(14, h))])
+        summary = (f"**{h}-Day Forecast — {label}**\n\n"
+                   f"| Metric | Value |\n|---|---|\n"
+                   f"| Predicted Total | **{fmt(total)}** |\n"
+                   f"| Daily Average | **{fmt(avg)}** |\n"
+                   f"| Peak Day | **{fmt(peak)}** on {peak_d} (Sat) |\n"
+                   f"| Lowest Day | **{fmt(low)}** on {low_d} (Mon) |\n"
+                   f"| Period | {fc_dates[0].strftime('%b %d')} → {fc_dates[-1].strftime('%b %d, %Y')} |\n\n"
+                   f"**Day-by-day (first 14 days):**\n\n| Date | Revenue |\n|---|---|\n"
+                   f"{day_rows}\n\n"
+                   f"> *Day-of-week adjusted · 5% growth factor applied*")
         return fig, summary
     except Exception as e:
         return go.Figure().update_layout(**dark_layout(f"Error: {e}", height=460)), f"Error: {e}"
