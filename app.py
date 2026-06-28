@@ -7,6 +7,17 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests as _http
 warnings.filterwarnings('ignore')
+# ── Gradio 5.9.1 schema bug fix ──────────────────────────────────────────────
+try:
+    import gradio_client.utils as _gcu
+    _orig_get_type = _gcu.get_type
+    def _patched_get_type(schema):
+        if not isinstance(schema, dict): return "any"
+        return _orig_get_type(schema)
+    _gcu.get_type = _patched_get_type
+except Exception: pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 GROWTH_RATE = 0.05
@@ -19,7 +30,7 @@ COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db',
 def load_data():
     if not SUPABASE_URL or not SUPABASE_KEY: print("SUPABASE not configured"); return pd.DataFrame()
     try:
-        r = _http.get(SUPABASE_URL+"/rest/v1/daily_input?select=*&order=date", headers={"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY})
+        r = _http.get(SUPABASE_URL+"/rest/v1/daily_input?select=*&order=date&limit=10000", headers={"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY})
         if r.status_code!=200: print("HTTP "+str(r.status_code)); return pd.DataFrame()
         data=r.json()
         if not data: return pd.DataFrame()
@@ -169,7 +180,10 @@ def chat(message, history):
     system = "You are an intelligence assistant for Savanna QSR Group, Zimbabwe. Data: "+str(len(df))+" rows. Revenue: ${:,.2f}".format(df['actual_revenue_usd'].sum())+". Complexes: "+', '.join(COMPLEXES)+". Brands: "+', '.join(BRANDS)+". Be concise." if not df.empty else "No data loaded."
     messages = [{"role":"system","content":system}]
     for h in (history or []):
-        if isinstance(h,dict): messages.append({"role":h["role"],"content":h["content"]})
+        if isinstance(h, dict): messages.append({"role":h["role"],"content":h["content"]})
+        elif isinstance(h, (list,tuple)) and len(h)==2:
+            if h[0]: messages.append({"role":"user","content":str(h[0])})
+            if h[1]: messages.append({"role":"assistant","content":str(h[1])})
     messages.append({"role":"user","content":message+"\n\n[DATA]: "+str(data_answer) if data_answer else message})
     try:
         r2 = _http.post("https://api.openai.com/v1/chat/completions", headers={"Authorization":"Bearer "+os.environ.get("OPENAI_API_KEY",""),"Content-Type":"application/json"}, json={"model":"gpt-4o-mini","messages":messages,"temperature":0.2,"max_tokens":600}); resp = r2.json()
@@ -214,17 +228,17 @@ with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
             seg_type.change(update_seg_choices,[seg_type],[seg_name])
             fc_btn.click(generate_forecast,[seg_type,seg_name,horizon],[fc_chart,fc_summary])
         with gr.TabItem("Intelligence Chat"):
-            chatbot_box = gr.Chatbot(height=420,type="messages",show_label=False)
+            chatbot_box = gr.Chatbot(height=420,show_label=False)
             with gr.Row():
                 chat_input = gr.Textbox(placeholder="Ask about Savanna QSR...",show_label=False,scale=9,container=False)
                 chat_send = gr.Button("Send",variant="primary",scale=1)
             def respond(message, history):
                 if not message or not message.strip(): return history or [], ""
                 reply = chat(message, history or [])
-                h = list(history or []); h.append({"role":"user","content":message}); h.append({"role":"assistant","content":reply})
+                h = list(history or []); h.append((message, reply))
                 return h, ""
             chat_send.click(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
             chat_input.submit(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
     gr.HTML('<div style="text-align:center;margin-top:16px;padding:12px;border-top:1px solid #1a3a6e;"><p style="color:#c9a84c;font-size:11px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:11px;">Data - Analytics - Intelligence</p></div>')
-demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
+demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False, ssr_mode=False)
 
