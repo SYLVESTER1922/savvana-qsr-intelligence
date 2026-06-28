@@ -373,225 +373,346 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         return go.Figure().update_layout(**dark_layout(f"Error: {e}", height=460)), f"Error: {e}"
 
 # ── Intelligence Chat ─────────────────────────────────────────────────────────
-def route_intent(message, dff):
-    if dff is None or dff.empty: return None
-    m = message.lower()
-    latest = dff['date'].max()
-    has_bud = 'budget_usd' in dff.columns and dff['budget_usd'].sum() > 0
+# ── Tool-calling intelligence layer (mirrors Stores Intelligence architecture) ─
+import json as _json
 
-    def ach_str(actual, budget):
-        return f" ({actual/budget*100:.1f}% of budget)" if budget > 0 else ""
+# Tool definitions — GPT picks which ones to call
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "q_revenue_by_date",
+        "description": "Revenue for a specific calendar date. Use for questions like 'how much on 10 Feb 2023', 'what was made on March 5', 'revenue on 2023-07-15'.",
+        "parameters": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "Date in YYYY-MM-DD format."}
+        }, "required": ["date"]}}},
+    {"type": "function", "function": {
+        "name": "q_revenue_by_period",
+        "description": "Revenue for a named period or date range. Use for 'last 7 days', 'last 30 days', 'this month', 'MTD', 'all time', or 'from X to Y'.",
+        "parameters": {"type": "object", "properties": {
+            "period": {"type": "string", "enum": ["last_7_days","last_30_days","last_90_days","mtd","all_time"]},
+            "date_from": {"type": "string", "description": "Optional start date YYYY-MM-DD for custom range."},
+            "date_to":   {"type": "string", "description": "Optional end date YYYY-MM-DD for custom range."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_revenue_by_month",
+        "description": "Revenue for a specific month and optional year. Use for 'how much in February', 'January 2023 revenue', 'what did we make in March'.",
+        "parameters": {"type": "object", "properties": {
+            "month": {"type": "integer", "description": "Month number 1-12."},
+            "year":  {"type": "integer", "description": "4-digit year. Omit to search all years."}
+        }, "required": ["month"]}}},
+    {"type": "function", "function": {
+        "name": "q_revenue_by_complex",
+        "description": "Revenue breakdown by complex/branch. Use for 'which complex is best', 'City Centre revenue', 'how is Westgate Mall doing', 'compare all branches'.",
+        "parameters": {"type": "object", "properties": {
+            "complex_name": {"type": "string", "description": "Specific complex name, or omit for all."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_revenue_by_brand",
+        "description": "Revenue breakdown by brand. Use for 'which brand is top', 'Flame & Grill revenue', 'how is Pie Palace doing', 'rank all brands'.",
+        "parameters": {"type": "object", "properties": {
+            "brand_name": {"type": "string", "description": "Specific brand name, or omit for all."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_complex_brand",
+        "description": "Revenue for a specific complex AND brand combination. Use for 'Flame & Grill at City Centre', 'Westgate Mall Pie Palace performance'.",
+        "parameters": {"type": "object", "properties": {
+            "complex_name": {"type": "string"},
+            "brand_name":   {"type": "string"}
+        }, "required": ["complex_name", "brand_name"]}}},
+    {"type": "function", "function": {
+        "name": "q_budget_achievement",
+        "description": "Budget achievement and variance analysis. Use for 'budget performance', 'are we on target', 'which sites are below budget', 'variance report', 'which complex needs attention'.",
+        "parameters": {"type": "object", "properties": {
+            "threshold_pct": {"type": "number", "description": "Flag sites below this % of budget. Default 90."},
+            "complex_name":  {"type": "string", "description": "Filter to one complex, or omit for all."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_customer_metrics",
+        "description": "Customer count and average spend per customer. Use for 'avg spend', 'customer turnover', 'foot traffic', 'footfall', 'spend per customer'.",
+        "parameters": {"type": "object", "properties": {
+            "complex_name": {"type": "string", "description": "Filter to one complex, or omit for all."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_prior_period_comparison",
+        "description": "Compare current revenue against prior month or prior year. Use for 'vs last month', 'prior year comparison', 'SDLM', 'SDLY', 'year on year', 'month on month'.",
+        "parameters": {"type": "object", "properties": {
+            "comparison": {"type": "string", "enum": ["prior_month", "prior_year"]}
+        }, "required": ["comparison"]}}},
+    {"type": "function", "function": {
+        "name": "q_daily_trend",
+        "description": "Daily revenue trend analysis. Use for 'daily trend', 'revenue pattern', 'day of week performance', 'best performing day', 'busiest day'.",
+        "parameters": {"type": "object", "properties": {
+            "group_by": {"type": "string", "enum": ["day_of_week","daily"], "description": "day_of_week for weekday analysis, daily for time series."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "q_rankings",
+        "description": "Rank and compare all complexes or brands. Use for 'rank all sites', 'full overview', 'performance summary', 'compare everything', 'leaderboard'.",
+        "parameters": {"type": "object", "properties": {
+            "by": {"type": "string", "enum": ["complex","brand","both"], "description": "What to rank. Default both."}
+        }}}},
+]
 
-    # Underperformance
-    if any(x in m for x in ['underperform','below budget','struggling','worst','attention','concern','risk','flag']):
-        if not has_bud: return "No budget data available."
-        recent = dff[dff['date'] >= latest - timedelta(days=7)]
-        perf = recent.groupby(['complex','brand']).apply(
-            lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum() if x['budget_usd'].sum()>0 else 1
-        ).reset_index(name='ach').sort_values('ach')
-        under = perf[perf['ach'] < 0.90]
-        if under.empty: return "All sites above 90% budget achievement in the last 7 days. No underperformers."
-        return "Sites below 90% budget (last 7 days):\n" + "\n".join(
-            [f"- {r.complex} / {r.brand}: {r.ach*100:.1f}%" for r in under.itertuples()])
+# ── Tool implementation functions (pandas on filtered df) ─────────────────────
+def _tool_q_revenue_by_date(dff, date):
+    import pandas as _pd
+    try:
+        target = _pd.to_datetime(date).date()
+    except:
+        return {"error": f"Could not parse date: {date}"}
+    day = dff[dff['date'].dt.date == target]
+    if day.empty:
+        return {"found": False, "date": date, "note": "No data for this date in the selected range."}
+    has_bud = 'budget_usd' in day.columns and day['budget_usd'].sum() > 0
+    rev = day['actual_revenue_usd'].sum()
+    bud = day['budget_usd'].sum() if has_bud else 0
+    cx = day.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+    br = day.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+    return {"found": True, "date": date, "total_revenue_usd": round(rev, 2),
+            "budget_usd": round(bud, 2), "budget_achievement_pct": round(rev/bud*100,1) if bud > 0 else None,
+            "by_complex": {k: round(v,2) for k,v in cx.items()},
+            "by_brand":   {k: round(v,2) for k,v in br.items()}}
 
-    # Budget achievement
-    if any(x in m for x in ['budget','achievement','target','variance']):
-        if not has_bud: return "No budget data."
-        overall = dff['actual_revenue_usd'].sum()/dff['budget_usd'].sum()*100
-        cx_ach = dff.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
-        br_ach = dff.groupby('brand').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
-        return f"Overall budget achievement: {overall:.1f}%\nBy complex:\n" + "\n".join([f"  - {cx}: {v:.1f}%" for cx,v in cx_ach.items()]) + "\nBy brand:\n" + "\n".join([f"  - {br}: {v:.1f}%" for br,v in br_ach.items()])
+def _tool_q_revenue_by_period(dff, period=None, date_from=None, date_to=None):
+    import pandas as _pd
+    df = dff.copy()
+    latest = df['date'].max()
+    if period == 'last_7_days':  df = df[df['date'] >= latest - timedelta(days=7)]
+    elif period == 'last_30_days': df = df[df['date'] >= latest - timedelta(days=30)]
+    elif period == 'last_90_days': df = df[df['date'] >= latest - timedelta(days=90)]
+    elif period == 'mtd':
+        df = df[(df['date'].dt.month==latest.month)&(df['date'].dt.year==latest.year)]
+    elif date_from or date_to:
+        if date_from: df = df[df['date'] >= _pd.to_datetime(date_from)]
+        if date_to:   df = df[df['date'] <= _pd.to_datetime(date_to)]
+    if df.empty: return {"found": False, "note": "No data for this period."}
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    rev = df['actual_revenue_usd'].sum()
+    bud = df['budget_usd'].sum() if has_bud else 0
+    days = df['date'].nunique()
+    return {"period": period or f"{date_from} to {date_to}",
+            "total_revenue_usd": round(rev,2), "days": days,
+            "daily_avg_usd": round(rev/days,2) if days>0 else 0,
+            "budget_usd": round(bud,2),
+            "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None,
+            "date_range": f"{df['date'].min().strftime('%b %d, %Y')} to {df['date'].max().strftime('%b %d, %Y')}"}
 
-    # Prior month
-    if any(x in m for x in ['prior month','last month','sdlm','month on month']):
-        if 'prior_month_actual' not in dff.columns or dff['prior_month_actual'].sum()==0: return "No prior month data."
-        act = dff['actual_revenue_usd'].sum(); pm = dff['prior_month_actual'].sum()
-        cx = dff.groupby('complex').agg(a=('actual_revenue_usd','sum'),p=('prior_month_actual','sum'))
-        lines = [f"vs Prior Month — Overall: {fmt(act)} vs {fmt(pm)} ({(act-pm)/pm*100:+.1f}%)"]
-        lines += [f"  - {r.Index}: {fmt(r.a)} vs {fmt(r.p)} ({(r.a-r.p)/r.p*100:+.1f}%)" for r in cx.itertuples() if r.p>0]
-        return "\n".join(lines)
+def _tool_q_revenue_by_month(dff, month, year=None):
+    df = dff[dff['date'].dt.month == month]
+    if year: df = df[df['date'].dt.year == year]
+    if df.empty:
+        import calendar
+        return {"found": False, "month": calendar.month_name[month], "year": year}
+    import calendar
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    rev = df['actual_revenue_usd'].sum()
+    bud = df['budget_usd'].sum() if has_bud else 0
+    cx = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+    br = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+    # Detect if multiple years
+    years = df['date'].dt.year.unique().tolist()
+    return {"found": True, "month": calendar.month_name[month], "year": year or years,
+            "total_revenue_usd": round(rev,2),
+            "budget_usd": round(bud,2), "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None,
+            "by_complex": {k: round(v,2) for k,v in cx.items()},
+            "by_brand":   {k: round(v,2) for k,v in br.items()}}
 
-    # Prior year
-    if any(x in m for x in ['prior year','last year','sdly','year on year']):
-        if 'prior_year_actual' not in dff.columns or dff['prior_year_actual'].sum()==0: return "No prior year data."
-        act = dff['actual_revenue_usd'].sum(); py = dff['prior_year_actual'].sum()
-        cx = dff.groupby('complex').agg(a=('actual_revenue_usd','sum'),p=('prior_year_actual','sum'))
-        lines = [f"vs Prior Year — Overall: {fmt(act)} vs {fmt(py)} ({(act-py)/py*100:+.1f}%)"]
-        lines += [f"  - {r.Index}: {fmt(r.a)} vs {fmt(r.p)} ({(r.a-r.p)/r.p*100:+.1f}%)" for r in cx.itertuples() if r.p>0]
-        return "\n".join(lines)
+def _tool_q_revenue_by_complex(dff, complex_name=None):
+    df = dff[dff['complex']==complex_name] if complex_name else dff
+    if df.empty: return {"found": False}
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    if complex_name:
+        rev = df['actual_revenue_usd'].sum()
+        bud = df['budget_usd'].sum() if has_bud else 0
+        br  = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+        return {"complex": complex_name, "total_revenue_usd": round(rev,2),
+                "budget_usd": round(bud,2), "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None,
+                "by_brand": {k: round(v,2) for k,v in br.items()}}
+    cx = df.groupby('complex').agg(rev=('actual_revenue_usd','sum'), bud=('budget_usd','sum') if has_bud else ('actual_revenue_usd','sum')).reset_index().sort_values('rev',ascending=False)
+    result = []
+    for r in cx.itertuples():
+        result.append({"complex": r.complex, "total_revenue_usd": round(r.rev,2),
+            "budget_achievement_pct": round(r.rev/r.bud*100,1) if has_bud and r.bud>0 else None})
+    return {"all_complexes": result, "total_revenue_usd": round(df['actual_revenue_usd'].sum(),2)}
 
-    # Yesterday / latest day
-    if any(x in m for x in ['yesterday','today','latest day','last day','daily']):
-        day = dff[dff['date']==latest]
-        if day.empty: return f"No data for {latest.strftime('%b %d')}."
-        rev = day['actual_revenue_usd'].sum()
-        bud = day['budget_usd'].sum() if has_bud else 0
-        cx_b = "\n".join([f"  - {r.complex}: {fmt(r.actual_revenue_usd)}" for r in day.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-        return f"{latest.strftime('%b %d, %Y')} revenue: {fmt(rev)}{ach_str(rev,bud)}\nBy complex:\n{cx_b}"
+def _tool_q_revenue_by_brand(dff, brand_name=None):
+    df = dff[dff['brand']==brand_name] if brand_name else dff
+    if df.empty: return {"found": False}
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    if brand_name:
+        rev = df['actual_revenue_usd'].sum()
+        bud = df['budget_usd'].sum() if has_bud else 0
+        cx  = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).to_dict()
+        return {"brand": brand_name, "total_revenue_usd": round(rev,2),
+                "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None,
+                "by_complex": {k: round(v,2) for k,v in cx.items()}}
+    br = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
+    return {"all_brands": [{"brand": b, "total_revenue_usd": round(v,2)} for b,v in br.items()],
+            "total_revenue_usd": round(df['actual_revenue_usd'].sum(),2)}
 
-    # 7-day / weekly
-    if any(x in m for x in ['7-day','7 day','last week','this week','weekly','week']):
-        w = dff[dff['date'] >= latest - timedelta(days=7)]
-        total = w['actual_revenue_usd'].sum()
-        bud = w['budget_usd'].sum() if has_bud else 0
-        davg = w.groupby('date')['actual_revenue_usd'].sum().mean()
-        cx_b = "\n".join([f"  - {r.complex}: {fmt(r.actual_revenue_usd)}" for r in w.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-        return f"Last 7 days: {fmt(total)} total{ach_str(total,bud)}, avg {fmt(davg)}/day\nBy complex:\n{cx_b}"
+def _tool_q_complex_brand(dff, complex_name, brand_name):
+    df = dff[(dff['complex']==complex_name)&(dff['brand']==brand_name)]
+    if df.empty: return {"found": False, "complex": complex_name, "brand": brand_name}
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    rev = df['actual_revenue_usd'].sum()
+    bud = df['budget_usd'].sum() if has_bud else 0
+    return {"found": True, "complex": complex_name, "brand": brand_name,
+            "total_revenue_usd": round(rev,2), "daily_avg_usd": round(df['actual_revenue_usd'].mean(),2),
+            "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None, "days": len(df)}
 
-    # 30-day / MTD
-    if any(x in m for x in ['30-day','30 day','this month','monthly','month to date','mtd']):
-        w = dff[dff['date'] >= latest - timedelta(days=30)]
-        total = w['actual_revenue_usd'].sum()
-        bud = w['budget_usd'].sum() if has_bud else 0
-        return f"Last 30 days: {fmt(total)} total{ach_str(total,bud)}"
+def _tool_q_budget_achievement(dff, threshold_pct=90, complex_name=None):
+    df = dff[dff['complex']==complex_name] if complex_name else dff
+    if df.empty or 'budget_usd' not in df.columns or df['budget_usd'].sum()==0:
+        return {"error": "No budget data available."}
+    overall_rev = df['actual_revenue_usd'].sum()
+    overall_bud = df['budget_usd'].sum()
+    cx = df.groupby('complex').apply(lambda x: {
+        "complex": x.name, "revenue_usd": round(x['actual_revenue_usd'].sum(),2),
+        "budget_usd": round(x['budget_usd'].sum(),2),
+        "achievement_pct": round(x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100,1) if x['budget_usd'].sum()>0 else 0
+    }).tolist()
+    cx.sort(key=lambda x: x['achievement_pct'])
+    below = [c for c in cx if c['achievement_pct'] < threshold_pct]
+    return {"overall_achievement_pct": round(overall_rev/overall_bud*100,1),
+            "overall_revenue_usd": round(overall_rev,2), "overall_budget_usd": round(overall_bud,2),
+            "threshold_pct": threshold_pct, "sites_below_threshold": below,
+            "all_complexes": sorted(cx, key=lambda x: -x['achievement_pct'])}
 
-    # Specific month query (e.g. "how much did Chill Creamery make in February")
-    import re as _re
-    month_names = ['january','february','march','april','may','june',
-                   'july','august','september','october','november','december']
-    matched_month = next((i+1 for i,mn in enumerate(month_names) if mn in m), None)
-    if matched_month:
-        yr_match = _re.search(r'\b(202[0-9])\b', m)
-        yr = int(yr_match.group(1)) if yr_match else None
-        mdf = dff[dff['date'].dt.month == matched_month]
-        if yr: mdf = mdf[mdf['date'].dt.year == yr]
-        month_label = month_names[matched_month-1].capitalize() + (f" {yr}" if yr else "")
-        if mdf.empty:
-            return f"No data available for {month_label}."
-        # check if question is about a specific brand or complex
-        for br in BRANDS:
-            if br.lower() in m:
-                sub = mdf[mdf['brand']==br]
-                if sub.empty: return f"No data for {br} in {month_label}."
-                bud = sub['budget_usd'].sum() if has_bud else 0
-                return f"{br} in {month_label}: {fmt(sub['actual_revenue_usd'].sum())}{ach_str(sub['actual_revenue_usd'].sum(),bud)}"
-        for cx in COMPLEXES:
-            if cx.lower() in m:
-                sub = mdf[mdf['complex']==cx]
-                if sub.empty: return f"No data for {cx} in {month_label}."
-                bud = sub['budget_usd'].sum() if has_bud else 0
-                return f"{cx} in {month_label}: {fmt(sub['actual_revenue_usd'].sum())}{ach_str(sub['actual_revenue_usd'].sum(),bud)}"
-        # Overall month
-        total_m = mdf['actual_revenue_usd'].sum()
-        bud_m = mdf['budget_usd'].sum() if has_bud else 0
-        cx_b = "\n".join([f"  - {r.complex}: {fmt(r.actual_revenue_usd)}" for r in mdf.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-        return f"{month_label} total: {fmt(total_m)}{ach_str(total_m,bud_m)}\nBy complex:\n{cx_b}"
+def _tool_q_customer_metrics(dff, complex_name=None):
+    df = dff[dff['complex']==complex_name] if complex_name else dff
+    if 'customer_count' not in df.columns or df['customer_count'].sum()==0:
+        return {"error": "No customer count data available."}
+    df = df[df['customer_count']>0]
+    if complex_name:
+        avg = df['actual_revenue_usd'].sum()/df['customer_count'].sum()
+        return {"complex": complex_name, "total_customers": int(df['customer_count'].sum()),
+                "avg_spend_per_customer_usd": round(avg,2)}
+    cx = df.groupby('complex').apply(lambda x: round(x['actual_revenue_usd'].sum()/x['customer_count'].sum(),2)).sort_values(ascending=False)
+    return {"total_customers": int(df['customer_count'].sum()),
+            "avg_spend_by_complex": {k: v for k,v in cx.items()},
+            "overall_avg_usd": round(df['actual_revenue_usd'].sum()/df['customer_count'].sum(),2)}
 
-    # Customer / spend
-    if any(x in m for x in ['customer','spend per','avg spend','average spend','foot traffic','footfall']):
-        if 'customer_count' not in dff.columns or dff['customer_count'].sum()==0: return "No customer count data."
-        avs = dff[dff['customer_count']>0].groupby('complex').apply(
-            lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).sort_values(ascending=False)
-        tc = int(dff['customer_count'].sum())
-        return f"Total customers: {tc:,}\nAvg spend per customer:\n" + "\n".join([f"  - {cx}: ${v:.2f}" for cx,v in avs.items()])
+def _tool_q_prior_period_comparison(dff, comparison):
+    col = 'prior_month_actual' if comparison=='prior_month' else 'prior_year_actual'
+    label = 'Prior Month' if comparison=='prior_month' else 'Prior Year'
+    if col not in dff.columns or dff[col].sum()==0:
+        return {"error": f"No {label} data available."}
+    act = dff['actual_revenue_usd'].sum(); prior = dff[col].sum()
+    cx = dff.groupby('complex').agg(actual=('actual_revenue_usd','sum'), prior=(col,'sum')).reset_index()
+    result = [{"complex": r.complex, "actual_usd": round(r.actual,2), "prior_usd": round(r.prior,2),
+               "change_pct": round((r.actual-r.prior)/r.prior*100,1) if r.prior>0 else None}
+              for r in cx.itertuples()]
+    return {"comparison": label, "overall_actual_usd": round(act,2),
+            "overall_prior_usd": round(prior,2),
+            "overall_change_pct": round((act-prior)/prior*100,1) if prior>0 else None,
+            "by_complex": result}
 
-    # Counter / throughput
-    if any(x in m for x in ['counter','till','throughput','revenue per counter']):
-        if 'revenue_per_counter' not in dff.columns or dff['revenue_per_counter'].sum()==0: return "No counter data."
-        rpc = dff[dff['revenue_per_counter']>0].groupby('complex')['revenue_per_counter'].mean().sort_values(ascending=False)
-        return "Revenue per counter:\n" + "\n".join([f"  - {cx}: {fmt(v)}" for cx,v in rpc.items()])
-
-    # Day of week
-    if any(x in m for x in ['best day','peak day','busiest','day of week','highest day']):
-        dow = dff.groupby(dff['date'].dt.day_name())['actual_revenue_usd'].mean()
+def _tool_q_daily_trend(dff, group_by='day_of_week'):
+    if group_by == 'day_of_week':
         order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+        dow = dff.groupby(dff['date'].dt.day_name())['actual_revenue_usd'].mean()
         dow = dow.reindex([d for d in order if d in dow.index])
-        return "Avg daily revenue by day of week:\n" + "\n".join([f"  - {d}: {fmt(v)}" for d,v in dow.sort_values(ascending=False).items()])
+        return {"group_by": "day_of_week",
+                "avg_revenue_by_day": {d: round(v,2) for d,v in dow.items()},
+                "best_day": dow.idxmax(), "worst_day": dow.idxmin()}
+    else:
+        daily = dff.groupby('date')['actual_revenue_usd'].sum()
+        return {"group_by": "daily", "days": len(daily),
+                "avg_daily_usd": round(daily.mean(),2), "max_daily_usd": round(daily.max(),2),
+                "min_daily_usd": round(daily.min(),2), "peak_date": str(daily.idxmax().date())}
 
-    # Rankings
-    if any(x in m for x in ['rank','ranking','all complex','all brand','compare all','overview','summary']):
-        cx = dff.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
+def _tool_q_rankings(dff, by='both'):
+    has_bud = 'budget_usd' in dff.columns and dff['budget_usd'].sum()>0
+    result = {}
+    if by in ('complex','both'):
+        cx = dff.groupby('complex').agg(rev=('actual_revenue_usd','sum'), bud=('budget_usd','sum') if has_bud else ('actual_revenue_usd','count')).reset_index().sort_values('rev',ascending=False)
+        result['complex_ranking'] = [{"rank": i+1, "complex": r.complex, "revenue_usd": round(r.rev,2),
+            "budget_achievement_pct": round(r.rev/r.bud*100,1) if has_bud and r.bud>0 else None}
+            for i,r in enumerate(cx.itertuples())]
+    if by in ('brand','both'):
         br = dff.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
-        cx_ach = dff.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if has_bud and x['budget_usd'].sum()>0 else None)
-        cx_lines = "\n".join([f"  {i+1}. {n}: {fmt(v)}{f' ({cx_ach[n]:.0f}% bud)' if cx_ach[n] else ''}" for i,(n,v) in enumerate(cx.items())])
-        br_lines = "\n".join([f"  {i+1}. {n}: {fmt(v)}" for i,(n,v) in enumerate(br.items())])
-        return f"Complex ranking:\n{cx_lines}\n\nBrand ranking:\n{br_lines}"
+        result['brand_ranking'] = [{"rank": i+1, "brand": b, "revenue_usd": round(v,2)}
+            for i,(b,v) in enumerate(br.items())]
+    return result
 
-    # Top / best
-    if any(x in m for x in ['top','best','highest','leading','number one']):
-        g_cx = dff.groupby('complex')['actual_revenue_usd'].sum()
-        g_br = dff.groupby('brand')['actual_revenue_usd'].sum()
-        return f"Top complex: {g_cx.idxmax()} ({fmt(g_cx.max())})\nTop brand: {g_br.idxmax()} ({fmt(g_br.max())})"
+TOOL_FUNC_MAP = {
+    "q_revenue_by_date":          _tool_q_revenue_by_date,
+    "q_revenue_by_period":        _tool_q_revenue_by_period,
+    "q_revenue_by_month":         _tool_q_revenue_by_month,
+    "q_revenue_by_complex":       _tool_q_revenue_by_complex,
+    "q_revenue_by_brand":         _tool_q_revenue_by_brand,
+    "q_complex_brand":            _tool_q_complex_brand,
+    "q_budget_achievement":       _tool_q_budget_achievement,
+    "q_customer_metrics":         _tool_q_customer_metrics,
+    "q_prior_period_comparison":  _tool_q_prior_period_comparison,
+    "q_daily_trend":              _tool_q_daily_trend,
+    "q_rankings":                 _tool_q_rankings,
+}
 
-    # Worst / lowest
-    if any(x in m for x in ['worst','lowest','bottom','poor','weakest']):
-        g_cx = dff.groupby('complex')['actual_revenue_usd'].sum()
-        g_br = dff.groupby('brand')['actual_revenue_usd'].sum()
-        return f"Lowest complex: {g_cx.idxmin()} ({fmt(g_cx.min())})\nLowest brand: {g_br.idxmin()} ({fmt(g_br.min())})"
+from datetime import date as _date_cls
+_TODAY = _date_cls.today().strftime("%d %B %Y")
 
-    # Total
-    if any(x in m for x in ['total','overall revenue']):
-        total = dff['actual_revenue_usd'].sum()
-        bud = dff['budget_usd'].sum() if has_bud else 0
-        return f"Total revenue: {fmt(total)}{ach_str(total,bud)} across {len(dff):,} records"
+SYSTEM_PROMPT = f"""You are the Savanna QSR Intelligence Assistant, built by Netrisyl Insights.
+Today is {_TODAY}. Data covers January 2023 to January 2024.
+Complexes: Westgate Mall, City Centre, Eastpark, Northgate.
+Brands: Flame & Grill, Pie Palace, Chill Creamery, Sizzle Wings.
 
-    # Complex × Brand
-    for cx in COMPLEXES:
-        for br in BRANDS:
-            if cx.lower() in m and br.lower() in m:
-                sub = dff[(dff['complex']==cx)&(dff['brand']==br)]
-                if not sub.empty:
-                    bud = sub['budget_usd'].sum() if has_bud else 0
-                    return f"{cx} / {br}: {fmt(sub['actual_revenue_usd'].sum())} total{ach_str(sub['actual_revenue_usd'].sum(),bud)}, {fmt(sub['actual_revenue_usd'].mean())}/day avg"
-
-    for cx in COMPLEXES:
-        if cx.lower() in m:
-            sub = dff[dff['complex']==cx]
-            bud = sub['budget_usd'].sum() if has_bud else 0
-            br_b = "\n".join([f"  - {r.brand}: {fmt(r.actual_revenue_usd)}" for r in sub.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-            return f"{cx}: {fmt(sub['actual_revenue_usd'].sum())} total{ach_str(sub['actual_revenue_usd'].sum(),bud)}\nBy brand:\n{br_b}"
-
-    for br in BRANDS:
-        if br.lower() in m:
-            sub = dff[dff['brand']==br]
-            bud = sub['budget_usd'].sum() if has_bud else 0
-            cx_b = "\n".join([f"  - {r.complex}: {fmt(r.actual_revenue_usd)}" for r in sub.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-            return f"{br}: {fmt(sub['actual_revenue_usd'].sum())} total{ach_str(sub['actual_revenue_usd'].sum(),bud)}\nBy complex:\n{cx_b}"
-
-    return None
-
-def build_chat_context(dff):
-    if dff is None or dff.empty: return "No data loaded."
-    cx_rev = dff.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
-    br_rev = dff.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
-    has_bud = 'budget_usd' in dff.columns and dff['budget_usd'].sum() > 0
-    total = dff['actual_revenue_usd'].sum()
-    bud   = dff['budget_usd'].sum() if has_bud else 0
-    dr    = f"{dff['date'].min().strftime('%b %d, %Y')} to {dff['date'].max().strftime('%b %d, %Y')}"
-    cx_lines = "\n".join([f"- {cx}: {fmt(v)}{f' ({v/dff[dff.complex==cx].budget_usd.sum()*100:.0f}% bud)' if has_bud and dff[dff.complex==cx].budget_usd.sum()>0 else ''}" for cx,v in cx_rev.items()])
-    br_lines = "\n".join([f"- {br}: {fmt(v)}" for br,v in br_rev.items()])
-    return f"""You are the Savanna QSR Intelligence assistant for Netrisyl Insights, Zimbabwe.
-Data range: {dr} | Records: {len(dff):,} | Total revenue: {fmt(total)}{f" ({total/bud*100:.1f}% of budget)" if has_bud else ""}
-
-REVENUE BY COMPLEX:
-{cx_lines}
-
-REVENUE BY BRAND:
-{br_lines}
-
-Complexes: {', '.join(COMPLEXES)}
-Brands: {', '.join(BRANDS)}
-
-Answer directly and concisely. Always cite figures. Use $ for amounts. Be honest when data is insufficient."""
+Rules:
+- ALWAYS use a tool to fetch real figures. NEVER invent numbers.
+- Use q_revenue_by_date for specific date questions.
+- Use q_revenue_by_month for month-level questions.
+- Use q_budget_achievement when asked about underperformance, targets, or which sites need attention.
+- Quote exact figures from tool results. Revenue in USD ($). Be concise and professional.
+- If data is not available for a query, say so clearly.
+- The user may have applied a date filter — your tools already reflect that filtered dataset.
+"""
 
 def chat(message, history, date_from, date_to):
     if not message or not message.strip(): return ""
     dff = filter_df(date_from, date_to)
-    data_ctx = route_intent(message, dff)
-    system   = build_chat_context(dff)
-    msgs = [{"role":"system","content":system}]
+    if dff.empty: return "No data loaded for the selected date range. Please adjust the filter or click Refresh Data."
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for h in (history or []):
-        if isinstance(h,(list,tuple)) and len(h)==2:
-            if h[0]: msgs.append({"role":"user","content":str(h[0])})
-            if h[1]: msgs.append({"role":"assistant","content":str(h[1])})
-    user_msg = f"{message}\n\n[COMPUTED DATA]: {data_ctx}" if data_ctx else message
-    msgs.append({"role":"user","content":user_msg})
+        if isinstance(h, (list, tuple)) and len(h) == 2:
+            if h[0]: messages.append({"role": "user",      "content": str(h[0])})
+            if h[1]: messages.append({"role": "assistant",  "content": str(h[1])})
+    messages.append({"role": "user", "content": message})
+
     try:
-        r = _http.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
-            json={"model":"gpt-4o-mini","messages":msgs,"temperature":0.2,"max_tokens":700})
-        return r.json()["choices"][0]["message"]["content"]
-    except Exception as e: return f"⚠️ {e}"
+        # Step 1: GPT decides which tool(s) to call
+        resp = _http.post("https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini", "messages": messages,
+                  "tools": TOOLS, "tool_choice": "auto", "temperature": 0})
+        resp.raise_for_status()
+        msg = resp.json()["choices"][0]["message"]
+
+        if not msg.get("tool_calls"):
+            # GPT answered directly without a tool
+            return msg.get("content", "I couldn't find an answer to that.")
+
+        # Step 2: Execute each tool call with the actual dataframe
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         "tool_calls": msg["tool_calls"]})
+        for tc in msg["tool_calls"]:
+            fn_name = tc["function"]["name"]
+            fn = TOOL_FUNC_MAP.get(fn_name)
+            try:
+                args = _json.loads(tc["function"]["arguments"] or "{}")
+                result = fn(dff, **args) if fn else {"error": f"Unknown tool: {fn_name}"}
+            except Exception as e:
+                result = {"error": str(e)}
+            messages.append({"role": "tool", "tool_call_id": tc["id"],
+                             "content": _json.dumps(result)})
+
+        # Step 3: GPT formats the final answer from tool results
+        final = _http.post("https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini", "messages": messages, "temperature": 0})
+        final.raise_for_status()
+        return final.json()["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        return f"⚠️ Error: {e}"
 
 def refresh_and_apply(date_from, date_to):
     _cache['loaded_at'] = 0
@@ -601,6 +722,9 @@ def refresh_and_apply(date_from, date_to):
     if dff.empty:
         return build_kpi_html(dff), f"⚠️ No data for selected range — {len(full):,} total rows available (Jan 2023 – Jan 2024)"
     return build_kpi_html(dff), f"✅ {len(full):,} rows total · Showing {len(dff):,} rows for selected range"
+
+
+
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 CSS = """
