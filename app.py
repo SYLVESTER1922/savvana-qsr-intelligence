@@ -61,22 +61,23 @@ def fmt(v):
     return "${:,.0f}".format(v)
 def dark(title, height=360):
     return dict(title=dict(text=title,font=dict(color='#c9a84c',size=14)),paper_bgcolor='#0a1628',plot_bgcolor='#0d1f38',font=dict(color='#c8d8f0',family='Arial',size=11),height=height,xaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),yaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),legend=dict(bgcolor='rgba(10,22,40,0.85)',bordercolor='#1a3a6e',borderwidth=1,font=dict(color='#c8d8f0')))
-def build_kpi_html():
-    df = get_df()
-    if df.empty:
+def build_kpi_html(dff=None):
+    if dff is None:
+        dff = get_df()
+    if dff.empty:
         tr,ap,tc,tb,dr = "--","--","--","--","No data"
     else:
-        tr = fmt(df['actual_revenue_usd'].sum())
-        bud = df['budget_usd'].sum() if 'budget_usd' in df.columns else 0
-        ap = "{:.1f}%".format(df['actual_revenue_usd'].sum()/bud*100) if bud > 0 else "--"
-        tc = df.groupby('complex')['actual_revenue_usd'].sum().idxmax()
-        tb = df.groupby('brand')['actual_revenue_usd'].sum().idxmax()
-        dr = df['date'].min().strftime('%b %d')+" - "+df['date'].max().strftime('%b %d, %Y')
+        tr = fmt(dff['actual_revenue_usd'].sum())
+        bud = dff['budget_usd'].sum() if 'budget_usd' in dff.columns else 0
+        ap = "{:.1f}%".format(dff['actual_revenue_usd'].sum()/bud*100) if bud > 0 else "--"
+        tc = dff.groupby('complex')['actual_revenue_usd'].sum().idxmax()
+        tb = dff.groupby('brand')['actual_revenue_usd'].sum().idxmax()
+        dr = dff['date'].min().strftime('%b %d')+" - "+dff['date'].max().strftime('%b %d, %Y')
     return '<div style="background:linear-gradient(135deg,#0d1b2a,#1a3a5c);padding:18px 28px 16px;border-radius:12px;margin-bottom:4px;border-left:4px solid #c9a84c;"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;"><div><h1 style="color:#fff;margin:0;font-size:22px;">Savanna QSR Intelligence</h1><p style="color:#aed6f1;margin:4px 0 0;font-size:13px;">Live Operations Intelligence - Zimbabwe</p></div><div style="text-align:right;"><p style="color:#c9a84c;margin:0;font-size:10px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p></div></div><div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;"><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tr+'</div><div style="color:#7fb3d3;font-size:11px;">Total Revenue</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+ap+'</div><div style="color:#7fb3d3;font-size:11px;">Budget Achievement</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tc+'</div><div style="color:#7fb3d3;font-size:11px;">Top Complex</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tb+'</div><div style="color:#7fb3d3;font-size:11px;">Top Brand</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#7fb3d3;font-size:16px;font-weight:700;">'+dr+'</div><div style="color:#7fb3d3;font-size:11px;">Data Range</div></div></div></div>'
 def build_dashboard(period):
     df = get_df()
     if df.empty:
-        e = go.Figure().update_layout(**dark("No data - click Refresh")); return [e]*6
+        e = go.Figure().update_layout(**dark("No data - click Refresh")); return [build_kpi_html()]+[e]*6
     dff = df.copy(); latest = dff['date'].max()
     if period == 'Last 7 Days': dff = dff[dff['date'] >= latest - timedelta(days=7)]
     elif period == 'Last 30 Days': dff = dff[dff['date'] >= latest - timedelta(days=30)]
@@ -84,11 +85,11 @@ def build_dashboard(period):
     elif period == 'MTD': dff = dff[(dff['date'].dt.month==latest.month)&(dff['date'].dt.year==latest.year)]
     cx = dff.groupby('complex').agg(actual=('actual_revenue_usd','sum'),budget=('budget_usd','sum')).reset_index().sort_values('actual',ascending=True)
     fig1 = go.Figure()
-    fig1.add_trace(go.Bar(name='Budget',x=cx['budget'],y=cx['complex'],orientation='h',marker_color='#1a3a6e',opacity=0.7))
-    fig1.add_trace(go.Bar(name='Actual',x=cx['actual'],y=cx['complex'],orientation='h',marker_color='#c9a84c',text=[fmt(v) for v in cx['actual']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
+    fig1.add_trace(go.Bar(name='Budget',x=cx['budget'],y=cx['complex'],orientation='h',marker=dict(color='#2a4a8a',line=dict(color='#c9a84c',width=1)),opacity=0.6))
+    fig1.add_trace(go.Bar(name='Actual',x=cx['actual'],y=cx['complex'],orientation='h',marker=dict(color='#c9a84c',line=dict(color='#1e2d5e',width=1)),text=[fmt(v) for v in cx['actual']],textposition='inside',insidetextanchor='middle',textfont=dict(color='#0a1628',size=12,family='Arial',weight='bold')))
     fig1.update_layout(**dark("Revenue by Complex",height=300),barmode='overlay',margin=dict(l=140,r=120,t=50,b=40))
     br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd',ascending=True)
-    fig2 = go.Figure(go.Bar(x=br['actual_revenue_usd'],y=br['brand'],orientation='h',marker_color=COLORS[:len(br)],text=[fmt(v) for v in br['actual_revenue_usd']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
+    fig2 = go.Figure(go.Bar(x=br['actual_revenue_usd'],y=br['brand'],orientation='h',marker=dict(color=['#1e2d5e','#c9a84c','#1abc9c','#e74c3c','#9b59b6','#2ecc71','#e67e22','#3498db'][:len(br)],line=dict(color='#c9a84c',width=1)),text=[fmt(v) for v in br['actual_revenue_usd']],textposition='inside',insidetextanchor='middle',textfont=dict(color='#ffffff',size=12,family='Arial',weight='bold')))
     fig2.update_layout(**dark("Revenue by Brand",height=280),margin=dict(l=140,r=120,t=50,b=40))
     daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
     fig3 = go.Figure()
@@ -110,12 +111,12 @@ def build_dashboard(period):
     if 'prior_year_actual' in dff.columns: comp_cols['sdly'] = 'prior_year_actual'
     comp = dff.groupby('complex')[list(comp_cols.values())].sum().reset_index()
     fig6 = go.Figure()
-    cmap = {'sdly':'#4a6a9e','sdlm':'#7fb3d3','actual':'#c9a84c'}
+    cmap = {'sdly':'#1e2d5e','sdlm':'#1abc9c','actual':'#c9a84c'}
     lmap = {'sdly':'Prior Year','sdlm':'Prior Month','actual':'This Period'}
     for key, col in comp_cols.items():
         if col in comp.columns: fig6.add_trace(go.Bar(name=lmap[key],x=comp['complex'],y=comp[col],marker_color=cmap[key],text=[fmt(v) for v in comp[col]],textposition='outside',textfont=dict(color='#c8d8f0',size=10)))
     fig6.update_layout(**dark("Actual vs Prior Periods",height=340),barmode='group',hovermode='x unified',margin=dict(l=60,r=40,t=50,b=60))
-    return fig1, fig2, fig3, fig4, fig5, fig6
+    return build_kpi_html(dff), fig1, fig2, fig3, fig4, fig5, fig6
 def generate_forecast(seg_type, seg_name, horizon):
     try:
         df = get_df()
@@ -172,27 +173,145 @@ def route_intent(message):
     df = get_df()
     if df.empty: return None
     m = message.lower()
-    if any(x in m for x in ['underperform','below budget','struggling']):
+    latest = df['date'].max()
+
+    # Budget / underperformance
+    if any(x in m for x in ['underperform','below budget','struggling','worst','attention','concern','risk']):
+        if 'budget_usd' not in df.columns: return "No budget data available."
+        recent = df[df['date'] >= latest - timedelta(days=7)]
+        perf = recent.groupby(['complex','brand']).apply(
+            lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum() if x['budget_usd'].sum()>0 else 1
+        ).reset_index(name='ach')
+        under = perf[perf['ach']<0.90].sort_values('ach')
+        if under.empty: return "All sites above 90% budget achievement in last 7 days."
+        return "Below 90% budget (last 7 days):\n" + "\n".join(
+            ["- {}/{}: {:.1f}%".format(r.complex,r.brand,r.ach*100) for r in under.itertuples()])
+
+    if any(x in m for x in ['budget','achievement','variance','target']):
         if 'budget_usd' not in df.columns: return "No budget data."
-        latest = df['date'].max(); recent = df[df['date'] >= latest - timedelta(days=7)]
-        perf = recent.groupby(['complex','brand']).apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum() if x['budget_usd'].sum()>0 else 1).reset_index(name='ach')
-        under = perf[perf['ach']<0.80]
-        if under.empty: return "No sites below 80% budget (7d)."
-        return "Below 80% (7d):\n" + "\n".join(["- "+r.complex+"/"+r.brand+": {:.1f}%".format(r.ach*100) for r in under.itertuples()])
-    if any(x in m for x in ['top complex','best complex']): g=df.groupby('complex')['actual_revenue_usd'].sum(); return "Top: "+g.idxmax()+" at "+fmt(g.max())
-    if any(x in m for x in ['top brand','best brand']): g=df.groupby('brand')['actual_revenue_usd'].sum(); return "Top: "+g.idxmax()+" at "+fmt(g.max())
-    if any(x in m for x in ['avg spend','average spend']):
-        if 'customer_count' not in df.columns: return "No customer data."
-        avs=df[df['customer_count']>0].groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).sort_values(ascending=False)
-        return "Avg spend:\n"+"\n".join(["- "+cx+": ${:.2f}".format(v) for cx,v in avs.items()])
-    if any(x in m for x in ['total revenue','overall']): return "Total: ${:,.2f}".format(df['actual_revenue_usd'].sum())
-    if '7-day' in m or '7 day' in m: ma=df[df['date']>=df['date'].max()-timedelta(days=7)].groupby('date')['actual_revenue_usd'].sum().mean(); return "7-day avg: ${:,.2f}/day".format(ma)
+        overall = df['actual_revenue_usd'].sum()/df['budget_usd'].sum()*100 if df['budget_usd'].sum()>0 else 0
+        cx_ach = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
+        br_ach = df.groupby('brand').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
+        return "Overall budget achievement: {:.1f}%\nBy complex:\n{}\nBy brand:\n{}".format(
+            overall,
+            "\n".join(["- {}: {:.1f}%".format(cx,v) for cx,v in cx_ach.items()]),
+            "\n".join(["- {}: {:.1f}%".format(br,v) for br,v in br_ach.items()]))
+
+    # Prior period comparisons
+    if any(x in m for x in ['prior month','last month','sdlm','vs month','month on month']):
+        if 'prior_month_actual' not in df.columns: return "No prior month data."
+        act=df['actual_revenue_usd'].sum(); pm=df['prior_month_actual'].sum()
+        cx = df.groupby('complex').agg(actual=('actual_revenue_usd','sum'),pm=('prior_month_actual','sum'))
+        lines = ["vs Prior Month — Overall: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(act,pm,(act-pm)/pm*100 if pm else 0)]
+        lines += ["- {}: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(r.Index,r.actual,r.pm,(r.actual-r.pm)/r.pm*100 if r.pm else 0) for r in cx.itertuples()]
+        return "\n".join(lines)
+
+    if any(x in m for x in ['prior year','last year','sdly','vs year','year on year']):
+        if 'prior_year_actual' not in df.columns: return "No prior year data."
+        act=df['actual_revenue_usd'].sum(); py=df['prior_year_actual'].sum()
+        cx = df.groupby('complex').agg(actual=('actual_revenue_usd','sum'),py=('prior_year_actual','sum'))
+        lines = ["vs Prior Year — Overall: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(act,py,(act-py)/py*100 if py else 0)]
+        lines += ["- {}: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(r.Index,r.actual,r.py,(r.actual-r.py)/r.py*100 if r.py else 0) for r in cx.itertuples()]
+        return "\n".join(lines)
+
+    # Daily / weekly / period summaries
+    if any(x in m for x in ['yesterday','today','latest day','last day']):
+        day = df[df['date']==latest]
+        if day.empty: return "No data for {}.".format(latest.strftime('%b %d'))
+        rev = day['actual_revenue_usd'].sum()
+        bud = day['budget_usd'].sum() if 'budget_usd' in day.columns else 0
+        ach = " ({:.1f}% of budget)".format(rev/bud*100) if bud>0 else ""
+        cx_b = "\n".join(["  - {}: ${:,.0f}".format(r.complex,r.actual_revenue_usd) for r in day.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
+        return "{} revenue: ${:,.0f}{}\nBy complex:\n{}".format(latest.strftime('%b %d'),rev,ach,cx_b)
+
+    if any(x in m for x in ['7-day','7 day','last week','this week','weekly','week']):
+        w = df[df['date'] >= latest - timedelta(days=7)]
+        total = w['actual_revenue_usd'].sum(); davg = w.groupby('date')['actual_revenue_usd'].sum().mean()
+        bud = w['budget_usd'].sum() if 'budget_usd' in w.columns else 0
+        ach = " ({:.1f}% of budget)".format(total/bud*100) if bud>0 else ""
+        cx_b = "\n".join(["  - {}: ${:,.0f}".format(r.complex,r.actual_revenue_usd) for r in w.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
+        return "Last 7 days: ${:,.0f} total{}, avg ${:,.0f}/day\nBy complex:\n{}".format(total,ach,davg,cx_b)
+
+    if any(x in m for x in ['30-day','30 day','this month','monthly','month to date','mtd']):
+        w = df[df['date'] >= latest - timedelta(days=30)]
+        total = w['actual_revenue_usd'].sum()
+        bud = w['budget_usd'].sum() if 'budget_usd' in w.columns else 0
+        ach = " ({:.1f}% of budget)".format(total/bud*100) if bud>0 else ""
+        return "Last 30 days: ${:,.0f} total{}".format(total,ach)
+
+    # Customer metrics
+    if any(x in m for x in ['customer','spend per','avg spend','average spend','foot traffic','footfall']):
+        if 'customer_count' not in df.columns or df['customer_count'].sum()==0:
+            return "No customer count data available."
+        avs = df[df['customer_count']>0].groupby('complex').apply(
+            lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).sort_values(ascending=False)
+        total_c = int(df['customer_count'].sum())
+        return "Total customers: {:,}\nAvg spend per customer:\n{}".format(
+            total_c, "\n".join(["- {}: ${:.2f}".format(cx,v) for cx,v in avs.items()]))
+
+    # Counter / throughput
+    if any(x in m for x in ['counter','till','throughput','revenue per counter']):
+        if 'revenue_per_counter' not in df.columns: return "No counter data."
+        rpc = df[df['revenue_per_counter']>0].groupby('complex')['revenue_per_counter'].mean().sort_values(ascending=False)
+        return "Revenue per counter:\n" + "\n".join(["- {}: ${:,.0f}".format(cx,v) for cx,v in rpc.items()])
+
+    # Day of week
+    if any(x in m for x in ['best day','peak day','busiest','day of week','highest day']):
+        dow = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
+        order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+        dow = dow.reindex([d for d in order if d in dow.index])
+        return "Average daily revenue by day:\n" + "\n".join(
+            ["- {}: ${:,.0f}".format(d,v) for d,v in dow.sort_values(ascending=False).items()])
+
+    # Rankings
+    if any(x in m for x in ['rank','ranking','all complex','all brand','compare all','overview']):
+        cx = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
+        br = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
+        bud_cx = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if 'budget_usd' in x.columns and x['budget_usd'].sum()>0 else 0) if 'budget_usd' in df.columns else None
+        cx_lines = "\n".join(["{}. {}: ${:,.0f}{}".format(i+1,n,v," ({:.0f}% bud)".format(bud_cx[n]) if bud_cx is not None else "") for i,(n,v) in enumerate(cx.items())])
+        br_lines = "\n".join(["{}. {}: ${:,.0f}".format(i+1,n,v) for i,(n,v) in enumerate(br.items())])
+        return "Complex ranking:\n{}\n\nBrand ranking:\n{}".format(cx_lines,br_lines)
+
+    # Top / bottom
+    if any(x in m for x in ['top','best','highest','leading','number one','#1']):
+        g_cx=df.groupby('complex')['actual_revenue_usd'].sum(); g_br=df.groupby('brand')['actual_revenue_usd'].sum()
+        return "Top complex: {} (${:,.0f})\nTop brand: {} (${:,.0f})".format(g_cx.idxmax(),g_cx.max(),g_br.idxmax(),g_br.max())
+
+    if any(x in m for x in ['worst','lowest','bottom','poor','weakest']):
+        g_cx=df.groupby('complex')['actual_revenue_usd'].sum(); g_br=df.groupby('brand')['actual_revenue_usd'].sum()
+        return "Lowest complex: {} (${:,.0f})\nLowest brand: {} (${:,.0f})".format(g_cx.idxmin(),g_cx.min(),g_br.idxmin(),g_br.min())
+
+    if any(x in m for x in ['total revenue','overall revenue','total']):
+        bud = df['budget_usd'].sum() if 'budget_usd' in df.columns else 0
+        ach = " ({:.1f}% of budget)".format(df['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
+        return "Total revenue: ${:,.0f}{} across {:,} records".format(df['actual_revenue_usd'].sum(),ach,len(df))
+
+    # Complex × Brand cross-query
+    for cx in COMPLEXES:
+        for br in BRANDS:
+            if cx.lower() in m and br.lower() in m:
+                sub=df[(df['complex']==cx)&(df['brand']==br)]
+                if not sub.empty:
+                    bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
+                    ach=" ({:.1f}% budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
+                    return "{}/{}: ${:,.0f} total{}, ${:,.0f}/day avg".format(
+                        cx,br,sub['actual_revenue_usd'].sum(),ach,sub['actual_revenue_usd'].mean())
+
     for cx in COMPLEXES:
         if cx.lower() in m:
-            sub=df[df['complex']==cx]; return cx+": ${:,.2f}".format(sub['actual_revenue_usd'].sum())
+            sub=df[df['complex']==cx]
+            bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
+            ach=" ({:.1f}% of budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
+            br_b="\n".join(["  - {}: ${:,.0f}".format(r.brand,r.actual_revenue_usd) for r in sub.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
+            return "{}: ${:,.0f} total{}\nBy brand:\n{}".format(cx,sub['actual_revenue_usd'].sum(),ach,br_b)
+
     for br in BRANDS:
         if br.lower() in m:
-            sub=df[df['brand']==br]; return br+": ${:,.2f}".format(sub['actual_revenue_usd'].sum())
+            sub=df[df['brand']==br]
+            bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
+            ach=" ({:.1f}% of budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
+            return "{}: ${:,.0f} total{}".format(br,sub['actual_revenue_usd'].sum(),ach)
+
     return None
 def build_system_prompt():
     df = get_df()
@@ -268,14 +387,14 @@ with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
             with gr.Row(): ch1=gr.Plot(show_label=False); ch2=gr.Plot(show_label=False)
             with gr.Row(): ch3=gr.Plot(show_label=False); ch4=gr.Plot(show_label=False)
             with gr.Row(): ch5=gr.Plot(show_label=False); ch6=gr.Plot(show_label=False)
-            dash_btn.click(build_dashboard,[period_sel],[ch1,ch2,ch3,ch4,ch5,ch6])
-            period_sel.change(build_dashboard,[period_sel],[ch1,ch2,ch3,ch4,ch5,ch6])
+            dash_btn.click(build_dashboard,[period_sel],[kpi_header,ch1,ch2,ch3,ch4,ch5,ch6])
+            period_sel.change(build_dashboard,[period_sel],[kpi_header,ch1,ch2,ch3,ch4,ch5,ch6])
             refresh_btn.click(refresh_data,[],[kpi_header,refresh_msg])
         with gr.TabItem("Forecast"):
             with gr.Row():
                 seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],value='Overall',label="Segment")
                 seg_name = gr.Dropdown(choices=['All'],value='All',label="Name",interactive=True)
-                horizon = gr.Radio(choices=[7,14,30,60],value=30,label="Days")
+                horizon = gr.Radio(choices=["7","14","30","60"],value="30",label="Horizon (days)")
                 fc_btn = gr.Button("Generate", variant="primary")
             fc_chart = gr.Plot(show_label=False); fc_summary = gr.Markdown()
             seg_type.change(update_seg_choices,[seg_type],[seg_name])
