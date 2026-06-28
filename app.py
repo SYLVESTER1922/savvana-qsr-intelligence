@@ -168,8 +168,9 @@ def build_kpi_html(dff=None):
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
         <img src="/file=NI_logo.png" alt="Netrisyl Insights"
              style="height:56px;width:auto;object-fit:contain;"
-             onerror="this.style.display='none';document.getElementById('ni-fallback').style.display='block'"/>
-        <div id="ni-fallback" class="ni-label" style="display:none;">NETRISYL INSIGHTS</div>
+             onerror="this.onerror=null;this.src='/file=NI%20logo.png'"
+             onload="this.style.display='block'"/>
+        <div class="ni-label">NETRISYL INSIGHTS</div>
       </div>
     </div>'''
 
@@ -307,7 +308,7 @@ def build_dashboard(date_from, date_to):
 
 # ── Forecast ──────────────────────────────────────────────────────────────────
 GROWTH = 0.05
-DOW    = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
+DOW    = {0:0.82,1:0.88,2:0.91,3:0.95,4:1.08,5:1.28,6:1.18}
 
 def update_seg_choices(seg_type):
     if seg_type == 'Overall':
@@ -353,21 +354,27 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         upper = [v*1.15 for v in fc_vals]
         lower = [v*0.85 for v in fc_vals]
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=seg_display['date'], y=seg_display['revenue'], name='Historical (last 90d)',
-            line=dict(color=C_NAVY, width=2.5), opacity=0.9,
+        fig.add_trace(go.Scatter(x=seg_display['date'], y=seg_display['revenue'],
+            name='Historical (last 90d)',
+            mode='lines+markers',
+            line=dict(color=C_NAVY, width=2.5),
+            marker=dict(size=4, color=C_NAVY),
+            opacity=0.9,
             hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Historical</extra>'))
         fig.add_trace(go.Scatter(
             x=fc_dates+fc_dates[::-1], y=upper+lower[::-1],
             fill='toself', fillcolor='rgba(201,168,76,0.15)',
             line=dict(color='rgba(0,0,0,0)'), name='Confidence Band', hoverinfo='skip'))
         fig.add_trace(go.Scatter(x=fc_dates, y=fc_vals, name=f'{h}-Day Forecast',
-            line=dict(color=C_GOLD, width=2.5, dash='dash'), mode='lines+markers',
-            marker=dict(size=5, color=C_GOLD),
-            hovertemplate='%{x|%b %d}<br>$%{y:,.0f}<extra>Forecast</extra>'))
+            line=dict(color=C_GOLD, width=3, dash='dash'), mode='lines+markers',
+            marker=dict(size=7, color=C_GOLD, symbol='circle',
+                        line=dict(color=C_NAVY, width=1)),
+            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Forecast</extra>'))
         fig.add_vline(x=str(last)[:10], line_dash='dot', line_color=C_GOLD, opacity=0.5)
-        all_vals = list(seg_display['revenue']) + fc_vals + upper
+        hist_vals = [v for v in seg_display['revenue'].tolist() if v and not np.isnan(float(v))]
+        all_vals = hist_vals + fc_vals + upper
         y_max = max(all_vals) * 1.15 if all_vals else 1
-        y_min = max(0, min(list(seg_display['revenue']) + lower) * 0.85)
+        y_min = max(0, min((hist_vals or [0]) + lower) * 0.85)
         layout = dark_layout(f"{label} — {h}-Day Forecast", height=480,
                              margin=dict(l=80,r=40,t=60,b=50))
         layout['hovermode'] = 'x unified'
