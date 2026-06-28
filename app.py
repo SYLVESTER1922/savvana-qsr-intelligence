@@ -206,22 +206,23 @@ def build_dashboard(date_from, date_to):
     fig2.update_layout(**dark_layout("Revenue by Brand", height=280),
                        xaxis_tickprefix='$', xaxis_tickformat=',.0f')
 
-    # 3. Daily Revenue Trend
+    # 3. Daily Revenue Trend — bar per day so it is clearly NOT cumulative
     daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
     fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(
+    fig3.add_trace(go.Bar(
         x=daily['date'], y=daily['actual_revenue_usd'], name='Actual',
-        line=dict(color=C_GOLD, width=2.5), fill='tozeroy',
-        fillcolor='rgba(201,168,76,0.10)'
+        marker=dict(color=C_GOLD, opacity=0.85, line=dict(color=C_NAVY, width=0.3)),
+        hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Daily Revenue</extra>'
     ))
     if 'budget_usd' in dff.columns:
         daily_b = dff.groupby('date')['budget_usd'].sum().reset_index()
         fig3.add_trace(go.Scatter(
-            x=daily_b['date'], y=daily_b['budget_usd'], name='Budget',
-            line=dict(color='#4a6a9e', width=1.5, dash='dot')
+            x=daily_b['date'], y=daily_b['budget_usd'], name='Daily Budget',
+            line=dict(color='#4a6a9e', width=1.5, dash='dot'),
+            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Budget</extra>'
         ))
     fig3.update_layout(**dark_layout("Daily Revenue Trend", height=340, margin=dict(l=80,r=30,t=45,b=50)),
-                       hovermode='x unified',
+                       hovermode='x unified', bargap=0.1,
                        yaxis_tickprefix='$', yaxis_tickformat=',.0f')
 
     # 4. Avg Spend Per Customer
@@ -437,6 +438,38 @@ def route_intent(message, dff):
         bud = w['budget_usd'].sum() if has_bud else 0
         return f"Last 30 days: {fmt(total)} total{ach_str(total,bud)}"
 
+    # Specific month query (e.g. "how much did Chill Creamery make in February")
+    import re as _re
+    month_names = ['january','february','march','april','may','june',
+                   'july','august','september','october','november','december']
+    matched_month = next((i+1 for i,mn in enumerate(month_names) if mn in m), None)
+    if matched_month:
+        yr_match = _re.search(r'\b(202[0-9])\b', m)
+        yr = int(yr_match.group(1)) if yr_match else None
+        mdf = dff[dff['date'].dt.month == matched_month]
+        if yr: mdf = mdf[mdf['date'].dt.year == yr]
+        month_label = month_names[matched_month-1].capitalize() + (f" {yr}" if yr else "")
+        if mdf.empty:
+            return f"No data available for {month_label}."
+        # check if question is about a specific brand or complex
+        for br in BRANDS:
+            if br.lower() in m:
+                sub = mdf[mdf['brand']==br]
+                if sub.empty: return f"No data for {br} in {month_label}."
+                bud = sub['budget_usd'].sum() if has_bud else 0
+                return f"{br} in {month_label}: {fmt(sub['actual_revenue_usd'].sum())}{ach_str(sub['actual_revenue_usd'].sum(),bud)}"
+        for cx in COMPLEXES:
+            if cx.lower() in m:
+                sub = mdf[mdf['complex']==cx]
+                if sub.empty: return f"No data for {cx} in {month_label}."
+                bud = sub['budget_usd'].sum() if has_bud else 0
+                return f"{cx} in {month_label}: {fmt(sub['actual_revenue_usd'].sum())}{ach_str(sub['actual_revenue_usd'].sum(),bud)}"
+        # Overall month
+        total_m = mdf['actual_revenue_usd'].sum()
+        bud_m = mdf['budget_usd'].sum() if has_bud else 0
+        cx_b = "\n".join([f"  - {r.complex}: {fmt(r.actual_revenue_usd)}" for r in mdf.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
+        return f"{month_label} total: {fmt(total_m)}{ach_str(total_m,bud_m)}\nBy complex:\n{cx_b}"
+
     # Customer / spend
     if any(x in m for x in ['customer','spend per','avg spend','average spend','foot traffic','footfall']):
         if 'customer_count' not in dff.columns or dff['customer_count'].sum()==0: return "No customer count data."
@@ -555,10 +588,12 @@ def chat(message, history, date_from, date_to):
 
 def refresh_and_apply(date_from, date_to):
     _cache['loaded_at'] = 0
+    _ = get_df()  # force reload
     dff = filter_df(date_from, date_to)
-    if dff.empty: return build_kpi_html(), "⚠️ No data — check Supabase connection"
     full = get_df()
-    return build_kpi_html(dff), f"✅ {len(full):,} rows loaded · Showing {len(dff):,} rows for selected range"
+    if dff.empty:
+        return build_kpi_html(dff), f"⚠️ No data for selected range — {len(full):,} total rows available (Jan 2023 – Jan 2024)"
+    return build_kpi_html(dff), f"✅ {len(full):,} rows total · Showing {len(dff):,} rows for selected range"
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 CSS = f"""
@@ -655,18 +690,18 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=CSS) as
     # ── Wiring ────────────────────────────────────────────────────────────────
     dash_outputs = [kpi_header, ch1, ch2, ch3, ch4, ch5, ch6]
 
-    apply_btn.click(
-        fn=lambda df, dt: (refresh_and_apply(df, dt)[0], f"Showing filtered range") + build_dashboard(df, dt)[1:],
-        inputs=[date_from, date_to],
-        outputs=[kpi_header, filter_msg] + [ch1,ch2,ch3,ch4,ch5,ch6]
-    )
+    def apply_filter(date_from, date_to):
+        dff = filter_df(date_from, date_to)
+        full = get_df()
+        if dff.empty:
+            e = go.Figure().update_layout(**dark_layout("No data for selected range"))
+            msg = f"⚠️ No data for selected dates — available range: Jan 2023 – Jan 2024 ({len(full):,} rows)"
+            return [build_kpi_html(dff), msg] + [e]*6
+        dash = build_dashboard(date_from, date_to)
+        msg = f"✅ Showing {len(dff):,} of {len(full):,} rows"
+        return [dash[0], msg] + list(dash[1:])
 
-    def apply_filter(df, dt):
-        kpi, msg = refresh_and_apply(df, dt) if False else (build_kpi_html(filter_df(df,dt)), "")
-        dash = build_dashboard(df, dt)
-        return [dash[0]] + [msg] + list(dash[1:])
-
-    apply_btn.click(fn=lambda df, dt: [build_kpi_html(filter_df(df,dt)), ""] + list(build_dashboard(df,dt)[1:]),
+    apply_btn.click(fn=apply_filter,
                     inputs=[date_from, date_to],
                     outputs=[kpi_header, filter_msg, ch1, ch2, ch3, ch4, ch5, ch6])
 
@@ -689,5 +724,12 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=CSS) as
                    outputs=[chatbot_box, chat_input])
     chat_input.submit(fn=respond, inputs=[chat_input, chatbot_box, date_from, date_to],
                       outputs=[chatbot_box, chat_input])
+
+    # Auto-load dashboard on startup with full dataset
+    demo.load(
+        fn=lambda: list(build_dashboard("", "")),
+        inputs=[],
+        outputs=[kpi_header, ch1, ch2, ch3, ch4, ch5, ch6]
+    )
 
 demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
