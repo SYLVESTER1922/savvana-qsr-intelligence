@@ -335,6 +335,9 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         if df.empty:
             return go.Figure().update_layout(**dark_layout("No data for selected range")), "No data."
         h = int(horizon)
+        # Force actual_revenue_usd to numeric before any groupby
+        df = df.copy()
+        df['actual_revenue_usd'] = pd.to_numeric(df['actual_revenue_usd'], errors='coerce').fillna(0)
         if seg_type == 'Overall':
             seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
             label = 'All Complexes & Brands'
@@ -349,6 +352,7 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
             seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index() if len(parts)==2 else df.groupby('date')['actual_revenue_usd'].sum().reset_index()
             label = seg_name
         seg.columns = ['date','revenue']
+        seg['revenue'] = pd.to_numeric(seg['revenue'], errors='coerce').fillna(0)
         seg = seg.sort_values('date').reset_index(drop=True)
         if len(seg) < 7:
             return go.Figure().update_layout(**dark_layout("Need at least 7 days of data for this segment")), "Insufficient data."
@@ -398,6 +402,7 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         # Show first 14 days breakdown
         day_rows = "\n".join([f"| {fc_dates[i].strftime('%a %b %d')} | **{fmt(fc_vals[i])}** |"
                                for i in range(min(14, h))])
+        debug_info = f"\n\n> *Historical avg: {fmt(float(seg['revenue'].mean()))}/day · Base used: {fmt(base)}/day*"
         summary = (f"**{h}-Day Forecast — {label}**\n\n"
                    f"| Metric | Value |\n|---|---|\n"
                    f"| Predicted Total | **{fmt(total)}** |\n"
@@ -407,7 +412,8 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
                    f"| Period | {fc_dates[0].strftime('%b %d')} → {fc_dates[-1].strftime('%b %d, %Y')} |\n\n"
                    f"**Day-by-day (first 14 days):**\n\n| Date | Revenue |\n|---|---|\n"
                    f"{day_rows}\n\n"
-                   f"> *Day-of-week adjusted · 5% growth factor applied*")
+                   f"> *Day-of-week adjusted · 5% growth factor applied*"
+                   + debug_info)
         return fig, summary
     except Exception as e:
         return go.Figure().update_layout(**dark_layout(f"Error: {e}", height=460)), f"Error: {e}"
