@@ -423,10 +423,13 @@ TOOLS = [
         }}}},
     {"type": "function", "function": {
         "name": "q_complex_brand",
-        "description": "Revenue for a specific complex AND brand combination. Use for 'Flame & Grill at City Centre', 'Westgate Mall Pie Palace performance'.",
+        "description": "Revenue for a specific complex AND brand combination, optionally on a specific date or date range. Use for 'Flame & Grill at City Centre', 'Westgate Mall Pie Palace on Feb 10', 'how did Northgate Pie Palace do on 10 February 2023'.",
         "parameters": {"type": "object", "properties": {
             "complex_name": {"type": "string"},
-            "brand_name":   {"type": "string"}
+            "brand_name":   {"type": "string"},
+            "date":         {"type": "string", "description": "Specific date YYYY-MM-DD, or omit for all-time."},
+            "date_from":    {"type": "string", "description": "Start of date range YYYY-MM-DD."},
+            "date_to":      {"type": "string", "description": "End of date range YYYY-MM-DD."}
         }, "required": ["complex_name", "brand_name"]}}},
     {"type": "function", "function": {
         "name": "q_budget_achievement",
@@ -558,15 +561,34 @@ def _tool_q_revenue_by_brand(dff, brand_name=None):
     return {"all_brands": [{"brand": b, "total_revenue_usd": round(v,2)} for b,v in br.items()],
             "total_revenue_usd": round(df['actual_revenue_usd'].sum(),2)}
 
-def _tool_q_complex_brand(dff, complex_name, brand_name):
-    df = dff[(dff['complex']==complex_name)&(dff['brand']==brand_name)]
+def _tool_q_complex_brand(dff, complex_name, brand_name, date=None, date_from=None, date_to=None):
+    import pandas as _pd
+    df = dff[(dff['complex']==complex_name)&(dff['brand']==brand_name)].copy()
     if df.empty: return {"found": False, "complex": complex_name, "brand": brand_name}
+    # Apply date filter if provided
+    if date:
+        try:
+            target = _pd.to_datetime(date).date()
+            df = df[df['date'].dt.date == target]
+            if df.empty: return {"found": False, "complex": complex_name, "brand": brand_name,
+                                 "note": f"No data for {complex_name}/{brand_name} on {date}"}
+        except: pass
+    elif date_from or date_to:
+        if date_from:
+            try: df = df[df['date'] >= _pd.to_datetime(date_from)]
+            except: pass
+        if date_to:
+            try: df = df[df['date'] <= _pd.to_datetime(date_to)]
+            except: pass
     has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
     rev = df['actual_revenue_usd'].sum()
     bud = df['budget_usd'].sum() if has_bud else 0
-    return {"found": True, "complex": complex_name, "brand": brand_name,
+    period = date if date else (f"{df['date'].min().date()} to {df['date'].max().date()}" if len(df)>1 else str(df['date'].iloc[0].date()))
+    return {"found": True, "complex": complex_name, "brand": brand_name, "period": period,
             "total_revenue_usd": round(rev,2), "daily_avg_usd": round(df['actual_revenue_usd'].mean(),2),
-            "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None, "days": len(df)}
+            "budget_usd": round(bud,2),
+            "budget_achievement_pct": round(rev/bud*100,1) if bud>0 else None,
+            "days": df['date'].nunique()}
 
 def _tool_q_budget_achievement(dff, threshold_pct=90, complex_name=None):
     df = dff[dff['complex']==complex_name] if complex_name else dff
