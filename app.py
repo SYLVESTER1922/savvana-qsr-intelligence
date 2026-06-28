@@ -10,11 +10,12 @@ warnings.filterwarnings('ignore')
 # ── Gradio 5.9.1 schema bug fix ──────────────────────────────────────────────
 try:
     import gradio_client.utils as _gcu
-    _orig_get_type = _gcu.get_type
-    def _patched_get_type(schema):
+    _orig_j2p = _gcu._json_schema_to_python_type
+    def _safe_j2p(schema, defs):
         if not isinstance(schema, dict): return "any"
-        return _orig_get_type(schema)
-    _gcu.get_type = _patched_get_type
+        try: return _orig_j2p(schema, defs)
+        except Exception: return "any"
+    _gcu._json_schema_to_python_type = _safe_j2p
 except Exception: pass
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -240,5 +241,5 @@ with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
             chat_send.click(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
             chat_input.submit(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
     gr.HTML('<div style="text-align:center;margin-top:16px;padding:12px;border-top:1px solid #1a3a6e;"><p style="color:#c9a84c;font-size:11px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:11px;">Data - Analytics - Intelligence</p></div>')
-demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False, ssr_mode=False)
+demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
 
