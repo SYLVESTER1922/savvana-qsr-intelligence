@@ -154,18 +154,22 @@ def build_kpi_html(dff=None):
         tc  = dff.groupby('complex')['actual_revenue_usd'].sum().idxmax()
         tb  = dff.groupby('brand')['actual_revenue_usd'].sum().idxmax()
         dr  = f"{dff['date'].min().strftime('%b %d, %Y')} → {dff['date'].max().strftime('%b %d, %Y')}"
-    return f'''<div style="background:linear-gradient(135deg,#0d1b2a,#1a3a5c);
-        padding:16px 24px;border-radius:10px;border-left:4px solid {C_GOLD};margin-bottom:6px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-        <div>
-          <h2 style="color:#fff;margin:0;font-size:19px;font-weight:700;">🍔 Savanna QSR Intelligence</h2>
-          <p style="color:#aed6f1;margin:3px 0 0;font-size:12px;">Live Operations Intelligence · Zimbabwe · Powered by Supabase</p>
-        </div>
-        <p style="color:{C_GOLD};margin:0;font-size:10px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p>
+    pills = "".join([
+        f'<div class="kpi-pill"><div class="kpi-val">{v}</div><div class="kpi-lbl">{l}</div></div>'
+        for v,l in [(rev,"Total Revenue"),(ach,"Budget Ach."),(tc,"Top Complex"),(tb,"Top Brand"),(dr,"Date Range")]
+    ])
+    return f'''<div id="savanna-hero">
+      <div>
+        <div class="brand-tag">SAVANNA QSR INTELLIGENCE</div>
+        <h2>Live Operations Dashboard</h2>
+        <p class="tagline">Zimbabwe · Real-time · Powered by Supabase + Netrisyl Insights</p>
+        <div class="kpi-row">{pills}</div>
       </div>
-      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
-        {''.join([f'<div style="background:rgba(10,22,40,0.75);padding:8px 16px;border-radius:7px;border:1px solid {C_GRID};text-align:center;min-width:80px;"><div style="color:{C_GOLD};font-size:16px;font-weight:700;">{v}</div><div style="color:#7fb3d3;font-size:10px;">{l}</div></div>'
-        for v,l in [(rev,"Total Revenue"),(ach,"Budget Ach."),(tc,"Top Complex"),(tb,"Top Brand"),(dr,"Date Range")]])}
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+        <img src="/file=NI_logo.png" alt="Netrisyl Insights"
+             style="height:56px;width:auto;object-fit:contain;"
+             onerror="this.style.display='none';document.getElementById('ni-fallback').style.display='block'"/>
+        <div id="ni-fallback" class="ni-label" style="display:none;">NETRISYL INSIGHTS</div>
       </div>
     </div>'''
 
@@ -341,15 +345,17 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
             return go.Figure().update_layout(**dark_layout("Need at least 7 days of data for this segment")), "Insufficient data."
         last = seg['date'].max()
         base = float(seg['revenue'].tail(min(h, len(seg))).mean())
+        # Limit historical display to last 90 days so forecast is proportionally visible
+        seg_display = seg[seg['date'] >= last - timedelta(days=90)].reset_index(drop=True)
         if np.isnan(base) or base <= 0: base = float(seg['revenue'].mean())
         fc_dates = [last + timedelta(days=i+1) for i in range(h)]
         fc_vals  = [round(base * DOW[d.weekday()] * (1+GROWTH), 2) for d in fc_dates]
         upper = [v*1.15 for v in fc_vals]
         lower = [v*0.85 for v in fc_vals]
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=seg['date'], y=seg['revenue'], name='Historical',
-            line=dict(color='#4a7aae', width=1.5), opacity=0.9,
-            hovertemplate='%{x|%b %d}<br>$%{y:,.0f}<extra>Historical</extra>'))
+        fig.add_trace(go.Scatter(x=seg_display['date'], y=seg_display['revenue'], name='Historical (last 90d)',
+            line=dict(color=C_NAVY, width=2.5), opacity=0.9,
+            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Historical</extra>'))
         fig.add_trace(go.Scatter(
             x=fc_dates+fc_dates[::-1], y=upper+lower[::-1],
             fill='toself', fillcolor='rgba(201,168,76,0.15)',
@@ -359,11 +365,15 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
             marker=dict(size=5, color=C_GOLD),
             hovertemplate='%{x|%b %d}<br>$%{y:,.0f}<extra>Forecast</extra>'))
         fig.add_vline(x=str(last)[:10], line_dash='dot', line_color=C_GOLD, opacity=0.5)
-        layout = dark_layout(f"{label} — {h}-Day Forecast", height=460,
-                             margin=dict(l=80,r=30,t=60,b=50))
+        all_vals = list(seg_display['revenue']) + fc_vals + upper
+        y_max = max(all_vals) * 1.15 if all_vals else 1
+        y_min = max(0, min(list(seg_display['revenue']) + lower) * 0.85)
+        layout = dark_layout(f"{label} — {h}-Day Forecast", height=480,
+                             margin=dict(l=80,r=40,t=60,b=50))
         layout['hovermode'] = 'x unified'
         layout['yaxis_tickprefix'] = '$'
         layout['yaxis_tickformat'] = ',.0f'
+        layout['yaxis_range'] = [y_min, y_max]
         fig.update_layout(**layout)
         total = sum(fc_vals); avg = total/h
         peak = max(fc_vals); peak_d = fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
@@ -892,9 +902,14 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
     kpi_header = gr.HTML(value=build_kpi_html())
 
     # ── Global date filter ────────────────────────────────────────────────────
+    # Set default dates from the loaded dataset
+    _init_df = get_df()
+    _d_from  = _init_df['date'].min().strftime('%Y-%m-%d') if not _init_df.empty else ""
+    _d_to    = _init_df['date'].max().strftime('%Y-%m-%d') if not _init_df.empty else ""
+
     with gr.Row():
-        date_from = gr.Textbox(label="From Date", placeholder="YYYY-MM-DD", scale=2)
-        date_to   = gr.Textbox(label="To Date",   placeholder="YYYY-MM-DD", scale=2)
+        date_from = gr.Textbox(label="From Date", value=_d_from, placeholder="YYYY-MM-DD", scale=2)
+        date_to   = gr.Textbox(label="To Date",   value=_d_to,   placeholder="YYYY-MM-DD", scale=2)
         apply_btn = gr.Button("Apply Filter", variant="primary", scale=1)
         refresh_btn = gr.Button("Refresh Data", variant="secondary", scale=1)
         filter_msg = gr.Markdown()
