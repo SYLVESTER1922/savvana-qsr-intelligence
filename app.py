@@ -86,18 +86,18 @@ def build_dashboard(period):
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(name='Budget',x=cx['budget'],y=cx['complex'],orientation='h',marker_color='#1a3a6e',opacity=0.7))
     fig1.add_trace(go.Bar(name='Actual',x=cx['actual'],y=cx['complex'],orientation='h',marker_color='#c9a84c',text=[fmt(v) for v in cx['actual']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
-    fig1.update_layout(**dark("Revenue by Complex",height=300),barmode='overlay',margin=dict(l=140,r=80,t=50,b=40))
+    fig1.update_layout(**dark("Revenue by Complex",height=300),barmode='overlay',margin=dict(l=140,r=120,t=50,b=40))
     br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd',ascending=True)
     fig2 = go.Figure(go.Bar(x=br['actual_revenue_usd'],y=br['brand'],orientation='h',marker_color=COLORS[:len(br)],text=[fmt(v) for v in br['actual_revenue_usd']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
-    fig2.update_layout(**dark("Revenue by Brand",height=280),margin=dict(l=140,r=80,t=50,b=40))
+    fig2.update_layout(**dark("Revenue by Brand",height=280),margin=dict(l=140,r=120,t=50,b=40))
     daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
     fig3 = go.Figure()
     fig3.add_trace(go.Scatter(x=daily['date'],y=daily['actual_revenue_usd'],name='Actual',line=dict(color='#c9a84c',width=2.5),fill='tozeroy',fillcolor='rgba(201,168,76,0.08)'))
-    fig3.update_layout(**dark("Daily Revenue Trend",height=360),hovermode='x unified',showlegend=False,margin=dict(l=70,r=40,t=50,b=50))
+    fig3.update_layout(**dark("Daily Revenue Trend",height=360),hovermode='x unified',showlegend=False,margin=dict(l=90,r=40,t=50,b=50),yaxis_tickprefix="$",yaxis_tickformat=",.0f")
     if 'customer_count' in dff.columns:
         avs = dff[dff['customer_count']>0].groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).reset_index(name='avg').sort_values('avg',ascending=True)
         fig4 = go.Figure(go.Bar(x=avs['avg'],y=avs['complex'],orientation='h',marker_color='#2ecc71',text=["${:.2f}".format(v) for v in avs['avg']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
-        fig4.update_layout(**dark("Avg Spend Per Customer",height=280),margin=dict(l=140,r=80,t=50,b=40))
+        fig4.update_layout(**dark("Avg Spend Per Customer",height=280),margin=dict(l=140,r=120,t=50,b=40))
     else: fig4 = go.Figure().update_layout(**dark("No customer data",height=280))
     try:
         heat = dff.groupby(['complex','brand']).apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).reset_index(name='ach')
@@ -154,7 +154,7 @@ def generate_forecast(seg_type, seg_name, horizon):
         fig.add_trace(go.Scatter(x=fc_dates+fc_dates[::-1],y=upper+lower[::-1],fill='toself',fillcolor='rgba(201,168,76,0.18)',line=dict(color='rgba(0,0,0,0)'),name='Confidence',hoverinfo='skip'))
         fig.add_trace(go.Scatter(x=fc_dates,y=fc_vals,name=str(horizon)+'-Day Forecast',line=dict(color='#c9a84c',width=2.5,dash='dash'),mode='lines+markers',marker=dict(size=4,color='#c9a84c')))
         fig.add_vline(x=last_date_str,line_dash='dot',line_color='#c9a84c',opacity=0.6)
-        fig.update_layout(**dark(label+" - "+str(horizon)+"-Day Forecast",height=480),hovermode='x unified',legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='right',x=1,bgcolor='rgba(10,22,40,0.8)',bordercolor='#1a3a6e',borderwidth=1,font=dict(color='#c8d8f0')),margin=dict(l=70,r=30,t=70,b=50))
+        fig.update_layout(**dark(label+" - "+str(horizon)+"-Day Forecast",height=480),hovermode='x unified',margin=dict(l=70,r=40,t=70,b=50))
         total=sum(fc_vals); avg=total/horizon; peak=max(fc_vals); peak_d=fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
         summary = "**"+str(horizon)+"-Day Forecast — "+label+"**\n\n| Metric | Value |\n|---|---|\n| Total | **${:,.2f}".format(total)+"** |\n| Daily Avg | **${:,.2f}".format(avg)+"** |\n| Peak | **${:,.2f}".format(peak)+" on "+peak_d+"** |"
         return fig, summary
@@ -199,10 +199,12 @@ def build_system_prompt():
     if df.empty: return "No data loaded. Tell the user to refresh data."
     cx_rev = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
     br_rev = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
-    cx_bud = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if 'budget_usd' in df.columns else None
+    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
+    cx_bud = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if has_bud else None
+    br_bud = df.groupby('brand').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if has_bud else None
     date_range = df['date'].min().strftime('%b %d, %Y')+" to "+df['date'].max().strftime('%b %d, %Y')
-    cx_lines = "\n".join(["- "+cx+": ${:,.0f}".format(v)+((" (budget achievement: {:.1f}%)".format(cx_bud[cx])) if cx_bud is not None and cx in cx_bud else "") for cx,v in cx_rev.items()])
-    br_lines = "\n".join(["- "+br+": ${:,.0f}".format(v) for br,v in br_rev.items()])
+    cx_lines = "\n".join(["- "+cx+": ${:,.0f}".format(v)+((" ({:.1f}% of budget)".format(cx_bud[cx])) if cx_bud is not None and cx in cx_bud else "") for cx,v in cx_rev.items()])
+    br_lines = "\n".join(["- "+br+": ${:,.0f}".format(v)+((" ({:.1f}% of budget)".format(br_bud[br])) if br_bud is not None and br in br_bud else "") for br,v in br_rev.items()])
     top_cx = cx_rev.idxmax(); top_br = br_rev.idxmax()
     total = df['actual_revenue_usd'].sum()
     bud_ach = (total / df['budget_usd'].sum() * 100) if 'budget_usd' in df.columns and df['budget_usd'].sum()>0 else None
