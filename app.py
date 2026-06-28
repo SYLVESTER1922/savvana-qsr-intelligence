@@ -605,7 +605,7 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=CSS) as
         date_to   = gr.Textbox(label="To Date",   placeholder="YYYY-MM-DD", scale=2)
         apply_btn = gr.Button("Apply Filter", variant="primary", scale=1)
         refresh_btn = gr.Button("Refresh Data", variant="secondary", scale=1)
-        filter_msg = gr.Markdown(scale=3)
+        filter_msg = gr.Markdown()
 
     with gr.Tabs():
 
