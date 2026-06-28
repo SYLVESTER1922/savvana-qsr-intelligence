@@ -25,17 +25,20 @@ OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
 COMPLEXES    = ['Westgate Mall', 'City Centre', 'Eastpark', 'Northgate']
 BRANDS       = ['Flame & Grill', 'Pie Palace', 'Chill Creamery', 'Sizzle Wings']
 
-# Stores Intelligence colour palette
-C_GOLD    = '#c9a84c'
-C_NAVY    = '#1e2d5e'
+# Stores Intelligence colour palette (exact match)
+C_NAVY    = '#1B2A4E'
+C_GOLD    = '#C9A55C'
+C_RED     = '#C0392B'
+C_ORANGE  = '#E67E22'
+C_GREEN   = '#27AE60'
 C_TEAL    = '#1abc9c'
-C_RED     = '#e74c3c'
 C_PURPLE  = '#9b59b6'
-C_BG      = '#0a1628'
-C_PLOT    = '#0d1f38'
-C_GRID    = '#1a3a6e'
-C_TEXT    = '#c8d8f0'
-BAR_COLS  = [C_GOLD, C_NAVY, C_TEAL, C_RED, C_PURPLE, '#2ecc71', '#e67e22', '#3498db']
+C_CREAM   = '#F7F3EC'
+C_BG      = '#F7F3EC'   # body bg — warm cream
+C_PLOT    = 'white'     # chart bg — white
+C_GRID    = '#e5e7eb'   # light gray grid
+C_TEXT    = '#1f2937'   # dark text on light bg
+BAR_COLS  = [C_NAVY, C_GOLD, C_GREEN, C_RED, C_ORANGE, C_TEAL, C_PURPLE, '#3498db']
 
 _cache = {'df': pd.DataFrame(), 'loaded_at': 0}
 CACHE_TTL = 300
@@ -102,15 +105,19 @@ def fmt(v):
     return f"${v:,.0f}"
 
 def dark_layout(title, height=320, margin=None):
-    m = margin or dict(l=150, r=30, t=45, b=40)
+    """Layout matching Stores Intelligence — white charts, navy/gold palette."""
+    m = margin or dict(l=150, r=30, t=50, b=40)
     return dict(
-        title=dict(text=title, font=dict(color=C_GOLD, size=13), x=0),
-        paper_bgcolor=C_BG, plot_bgcolor=C_PLOT,
-        font=dict(color=C_TEXT, family='Arial', size=11),
+        title=dict(text=title, font=dict(color=C_NAVY, size=13, family='Inter, Arial'), x=0),
+        paper_bgcolor='white', plot_bgcolor='white',
+        font=dict(color='#374151', family='Inter, Arial', size=11),
         height=height,
-        xaxis=dict(gridcolor=C_GRID, linecolor=C_GRID, tickfont=dict(color=C_TEXT), title_font=dict(color=C_TEXT)),
-        yaxis=dict(gridcolor=C_GRID, linecolor=C_GRID, tickfont=dict(color=C_TEXT), title_font=dict(color=C_TEXT)),
-        legend=dict(bgcolor='rgba(10,22,40,0.85)', bordercolor=C_GRID, borderwidth=1, font=dict(color=C_TEXT)),
+        xaxis=dict(gridcolor='#f3f4f6', linecolor='#e5e7eb',
+                   tickfont=dict(color='#6b7280'), title_font=dict(color='#374151')),
+        yaxis=dict(gridcolor='#f3f4f6', linecolor='#e5e7eb',
+                   tickfont=dict(color='#6b7280'), title_font=dict(color='#374151')),
+        legend=dict(bgcolor='white', bordercolor='#e5e7eb', borderwidth=1,
+                    font=dict(color='#374151')),
         margin=m
     )
 
@@ -183,7 +190,7 @@ def build_dashboard(date_from, date_to):
         name='Actual', x=cx['actual'], y=cx['complex'], orientation='h',
         marker=dict(color=C_GOLD, line=dict(color=C_NAVY, width=1)),
         text=[fmt(v) for v in cx['actual']], textposition='inside',
-        insidetextanchor='middle', textfont=dict(color='#0a1628', size=12, family='Arial')
+        insidetextanchor='middle', textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial', weight='bold')
     ))
     fig1.update_layout(**dark_layout("Revenue by Complex — Actual vs Budget", height=300),
                        barmode='overlay',
@@ -201,7 +208,7 @@ def build_dashboard(date_from, date_to):
         x=br['actual_revenue_usd'], y=br['brand'], orientation='h',
         marker=dict(color=BAR_COLS[:len(br)], line=dict(color=C_GRID, width=1)),
         text=texts, textposition='inside', insidetextanchor='middle',
-        textfont=dict(color='#ffffff', size=12, family='Arial')
+        textfont=dict(color='white', size=11, family='Inter, Arial', weight='bold')
     ))
     fig2.update_layout(**dark_layout("Revenue by Brand", height=280),
                        xaxis_tickprefix='$', xaxis_tickformat=',.0f')
@@ -234,7 +241,7 @@ def build_dashboard(date_from, date_to):
             x=avs['avg'], y=avs['complex'], orientation='h',
             marker=dict(color=C_TEAL, line=dict(color=C_NAVY, width=1)),
             text=[f"${v:.2f}" for v in avs['avg']], textposition='inside',
-            insidetextanchor='middle', textfont=dict(color='#0a1628', size=12, family='Arial')
+            insidetextanchor='middle', textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial', weight='bold')
         ))
         fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280),
                            xaxis_tickprefix='$', xaxis_tickformat=',.2f')
@@ -596,41 +603,167 @@ def refresh_and_apply(date_from, date_to):
     return build_kpi_html(dff), f"✅ {len(full):,} rows total · Showing {len(dff):,} rows for selected range"
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
-CSS = f"""
-body,.gradio-container{{background:{C_BG}!important;font-family:Arial,sans-serif!important;}}
-.tab-nav{{background:#0d1628!important;border-bottom:2px solid {C_GRID}!important;padding:0 8px!important;}}
-button[class*="tab-"]{{color:#7fb3d3!important;background:transparent!important;border:none!important;
-  border-bottom:3px solid transparent!important;padding:10px 18px!important;font-size:13px!important;font-weight:500!important;}}
-button[class*="tab-"]:hover{{color:#fff!important;background:rgba(201,168,76,0.06)!important;}}
-button[class*="tab-"][class*="selected"],div[role="tablist"] button[aria-selected="true"]{{
-  color:{C_GOLD}!important;border-bottom:3px solid {C_GOLD}!important;font-weight:700!important;}}
-.gradio-container *{{color:{C_TEXT};}}
-.gradio-container input,.gradio-container textarea{{
-  background:#0d1628!important;color:{C_TEXT}!important;border:1px solid {C_GRID}!important;border-radius:6px!important;}}
-.gradio-container label,.gradio-container .label-wrap span{{color:#a8c8f0!important;}}
-input[type="radio"]{{accent-color:{C_GOLD}!important;}}
-button.primary,button[variant="primary"]{{background:{C_GOLD}!important;color:#0a1628!important;
-  font-weight:700!important;border:none!important;border-radius:6px!important;font-size:13px!important;}}
-button.primary:hover{{background:#e0be6a!important;}}
-button.secondary,button[variant="secondary"]{{background:{C_NAVY}!important;color:{C_TEXT}!important;
-  border:1px solid {C_GOLD}!important;border-radius:6px!important;}}
-.gradio-container .block,.gradio-container .form{{background:#0d1628!important;
-  border:1px solid {C_GRID}!important;border-radius:8px!important;}}
-ul[role="listbox"]{{background:#0d1628!important;border:1px solid {C_GOLD}!important;border-radius:6px!important;}}
-ul[role="listbox"] li{{color:#fff!important;background:#0d1628!important;}}
-ul[role="listbox"] li:hover,ul[role="listbox"] li[aria-selected="true"]{{background:{C_GOLD}!important;color:#0a1628!important;}}
-div[class*="chatbot"],.chatbot{{background:#040c1a!important;border-radius:10px!important;}}
-.gradio-container .prose{{color:{C_TEXT}!important;}}
-.gradio-container .prose strong{{color:{C_GOLD}!important;}}
-.gradio-container .prose th{{background:#0d1628!important;color:{C_GOLD}!important;}}
-.gradio-container .prose td{{border-color:{C_GRID}!important;}}
-::-webkit-scrollbar{{width:5px;height:5px;}}
-::-webkit-scrollbar-thumb{{background:{C_GOLD};border-radius:4px;}}
-footer{{display:none!important;}}
+CSS = """
+.gradio-container {
+    font-family: 'Inter', 'Helvetica Neue', system-ui, sans-serif !important;
+    max-width: 1500px !important;
+    margin: 0 auto !important;
+}
+/* Hero header — exact Stores Intelligence style */
+#savanna-hero {
+    background: linear-gradient(135deg, #1B2A4E 0%, #2C4170 100%);
+    border-radius: 16px;
+    padding: 20px 28px;
+    margin-bottom: 16px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    box-shadow: 0 8px 24px rgba(27,42,78,0.18);
+    position: relative;
+    overflow: hidden;
+}
+#savanna-hero::after {
+    content: "";
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #C9A55C 0%, #E4CC8E 50%, #C9A55C 100%);
+}
+#savanna-hero .brand-tag {
+    font-size: 0.75em;
+    color: #C9A55C;
+    letter-spacing: 3px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+#savanna-hero h2 { font-size: 1.7em !important; font-weight: 700 !important;
+    margin: 0 0 2px !important; color: white !important; }
+#savanna-hero .tagline { font-size: 0.88em; color: #cbd5e1; margin: 0; }
+#savanna-hero .ni-label { font-size: 0.65em; letter-spacing: 2px;
+    color: #C9A55C; font-weight: 700; text-transform: uppercase; }
+/* KPI pills */
+.kpi-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.kpi-pill { background: rgba(255,255,255,0.10); border: 1px solid rgba(201,165,92,0.35);
+    border-radius: 8px; padding: 7px 14px; text-align: center; min-width: 90px; }
+.kpi-pill .kpi-val { color: #C9A55C; font-size: 15px; font-weight: 700; }
+.kpi-pill .kpi-lbl { color: #94a3b8; font-size: 10px; margin-top: 2px; }
+/* Filter bar */
+.filter-bar { background: white; border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 12px; }
+/* Tab nav — Stores Intelligence style */
+.tab-nav, div[role="tablist"] {
+    background: white !important;
+    border-bottom: 2px solid #e5e7eb !important;
+    padding: 0 8px !important;
+}
+button[class*="tab-"], div[role="tablist"] button {
+    color: #6b7280 !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 3px solid transparent !important;
+    padding: 10px 18px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    font-family: Inter, Arial, sans-serif !important;
+}
+button[class*="tab-"]:hover { color: #1B2A4E !important; }
+button[class*="tab-"][class*="selected"],
+div[role="tablist"] button[aria-selected="true"] {
+    color: #1B2A4E !important;
+    border-bottom: 3px solid #C9A55C !important;
+    font-weight: 700 !important;
+}
+/* Primary buttons — navy + white */
+button.primary, button[variant="primary"] {
+    background: #1B2A4E !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-family: Inter, Arial, sans-serif !important;
+    font-size: 13px !important;
+}
+button.primary:hover, button[variant="primary"]:hover {
+    background: #0F1A35 !important;
+}
+/* Secondary buttons */
+button.secondary, button[variant="secondary"] {
+    background: white !important;
+    color: #1B2A4E !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+}
+button.secondary:hover, button[variant="secondary"]:hover {
+    background: #1B2A4E !important;
+    color: white !important;
+    border-color: #1B2A4E !important;
+}
+/* Inputs */
+.gradio-container input, .gradio-container textarea {
+    background: white !important;
+    color: #1f2937 !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
+    font-family: Inter, Arial, sans-serif !important;
+}
+.gradio-container input:focus, .gradio-container textarea:focus {
+    border-color: #1B2A4E !important;
+    box-shadow: 0 0 0 3px rgba(27,42,78,0.08) !important;
+    outline: none !important;
+}
+/* Labels */
+.gradio-container label, .gradio-container .label-wrap span {
+    color: #374151 !important;
+    font-weight: 500 !important;
+}
+/* Blocks */
+.gradio-container .block, .gradio-container .form {
+    background: white !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 12px !important;
+}
+/* Dropdowns */
+ul[role="listbox"] { background: white !important; border: 1px solid #1B2A4E !important; border-radius: 8px !important; }
+ul[role="listbox"] li { color: #1f2937 !important; background: white !important; }
+ul[role="listbox"] li:hover, ul[role="listbox"] li[aria-selected="true"] {
+    background: #1B2A4E !important; color: white !important; }
+/* Radio buttons */
+input[type="radio"] { accent-color: #1B2A4E !important; }
+/* Chat */
+div[class*="chatbot"], .chatbot { background: #fafafa !important; border-radius: 12px !important; }
+/* Markdown */
+.gradio-container .prose { color: #1f2937 !important; }
+.gradio-container .prose strong { color: #1B2A4E !important; }
+.gradio-container .prose h3 { color: #1B2A4E !important; }
+.gradio-container .prose th { background: #f8f9fa !important; color: #1B2A4E !important; }
+.gradio-container .prose td { border-color: #e5e7eb !important; color: #374151 !important; }
+/* Filter message */
+#filter-msg { color: #374151 !important; font-size: 12px !important; }
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: #C9A55C; border-radius: 4px; }
+footer { display: none !important; }
 """
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", css=CSS) as demo:
+theme = gr.themes.Soft(
+    primary_hue=gr.themes.colors.slate,
+    secondary_hue=gr.themes.colors.amber,
+    neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Inter"), "system-ui", "sans-serif"],
+).set(
+    button_primary_background_fill="#1B2A4E",
+    button_primary_background_fill_hover="#0F1A35",
+    button_primary_text_color="white",
+    body_background_fill="#F7F3EC",
+    block_background_fill="white",
+    block_border_color="#e5e7eb",
+)
+
+with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme, css=CSS) as demo:
 
     kpi_header = gr.HTML(value=build_kpi_html())
 
