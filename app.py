@@ -117,31 +117,50 @@ def build_dashboard(period):
     fig6.update_layout(**dark("Actual vs Prior Periods",height=340),barmode='group',hovermode='x unified',margin=dict(l=60,r=40,t=50,b=60))
     return fig1, fig2, fig3, fig4, fig5, fig6
 def generate_forecast(seg_type, seg_name, horizon):
-    df = get_df()
-    if df.empty: return go.Figure().update_layout(**dark("No data")), "No data."
-    horizon = int(horizon)
-    if seg_type == 'Overall': seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-    elif seg_type == 'By Complex': seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-    elif seg_type == 'By Brand': seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-    else:
-        parts = seg_name.split(' | ')
-        seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index() if len(parts)==2 else df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-    seg.columns = ['date','revenue']; seg = seg.sort_values('date').reset_index(drop=True)
-    if len(seg) < 7: return go.Figure().update_layout(**dark("Need 7+ days")), "Insufficient data."
-    last_date = seg['date'].max(); base = seg['revenue'].tail(min(horizon, len(seg))).mean()
-    DOW = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
-    fc_dates = [last_date + timedelta(days=i+1) for i in range(horizon)]
-    fc_vals = [round(base * DOW[d.weekday()] * (1+GROWTH_RATE), 2) for d in fc_dates]
-    upper = [v*1.15 for v in fc_vals]; lower = [v*0.85 for v in fc_vals]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=seg['date'],y=seg['revenue'],name='Historical',line=dict(color='#4a7aae',width=1.2),opacity=0.85))
-    fig.add_trace(go.Scatter(x=fc_dates+fc_dates[::-1],y=upper+lower[::-1],fill='toself',fillcolor='rgba(201,168,76,0.18)',line=dict(color='rgba(0,0,0,0)'),name='Confidence',hoverinfo='skip'))
-    fig.add_trace(go.Scatter(x=fc_dates,y=fc_vals,name=str(horizon)+'-Day Forecast',line=dict(color='#c9a84c',width=2.5,dash='dash'),mode='lines+markers',marker=dict(size=4,color='#c9a84c')))
-    fig.add_vline(x=last_date,line_dash='dot',line_color='#c9a84c',opacity=0.6)
-    fig.update_layout(**dark(seg_name+" - "+str(horizon)+"-Day Forecast",height=480),hovermode='x unified',legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='right',x=1,bgcolor='rgba(10,22,40,0.8)',bordercolor='#1a3a6e',borderwidth=1,font=dict(color='#c8d8f0')),margin=dict(l=70,r=30,t=70,b=50))
-    total=sum(fc_vals); avg=total/horizon; peak=max(fc_vals); peak_d=fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
-    summary = "**"+str(horizon)+"-Day Forecast**\n\n| Metric | Value |\n|---|---|\n| Total | **${:,.2f}".format(total)+"** |\n| Daily Avg | **${:,.2f}".format(avg)+"** |\n| Peak | **${:,.2f}".format(peak)+" on "+peak_d+"** |"
-    return fig, summary
+    try:
+        df = get_df()
+        if df.empty: return go.Figure().update_layout(**dark("No data")), "No data."
+        horizon = int(horizon)
+        if seg_type == 'Overall':
+            seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = 'All Complexes'
+        elif seg_type == 'By Complex':
+            seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = seg_name
+        elif seg_type == 'By Brand':
+            seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = seg_name
+        else:
+            parts = seg_name.split(' | ')
+            if len(parts)==2:
+                seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index()
+            else:
+                seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = seg_name
+        seg.columns = ['date','revenue']
+        seg = seg.sort_values('date').reset_index(drop=True)
+        if len(seg) < 7:
+            return go.Figure().update_layout(**dark("Need 7+ days of data for this segment")), "Insufficient data for this segment."
+        last_date = seg['date'].max()
+        base = seg['revenue'].tail(min(horizon, len(seg))).mean()
+        if pd.isna(base) or base <= 0: base = seg['revenue'].mean()
+        DOW = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
+        fc_dates = [last_date + timedelta(days=i+1) for i in range(horizon)]
+        fc_vals = [round(float(base) * DOW[d.weekday()] * (1+GROWTH_RATE), 2) for d in fc_dates]
+        upper = [v*1.15 for v in fc_vals]; lower = [v*0.85 for v in fc_vals]
+        last_date_str = str(last_date)[:10]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=seg['date'],y=seg['revenue'],name='Historical',line=dict(color='#4a7aae',width=1.2),opacity=0.85))
+        fig.add_trace(go.Scatter(x=fc_dates+fc_dates[::-1],y=upper+lower[::-1],fill='toself',fillcolor='rgba(201,168,76,0.18)',line=dict(color='rgba(0,0,0,0)'),name='Confidence',hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=fc_dates,y=fc_vals,name=str(horizon)+'-Day Forecast',line=dict(color='#c9a84c',width=2.5,dash='dash'),mode='lines+markers',marker=dict(size=4,color='#c9a84c')))
+        fig.add_vline(x=last_date_str,line_dash='dot',line_color='#c9a84c',opacity=0.6)
+        fig.update_layout(**dark(label+" - "+str(horizon)+"-Day Forecast",height=480),hovermode='x unified',legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='right',x=1,bgcolor='rgba(10,22,40,0.8)',bordercolor='#1a3a6e',borderwidth=1,font=dict(color='#c8d8f0')),margin=dict(l=70,r=30,t=70,b=50))
+        total=sum(fc_vals); avg=total/horizon; peak=max(fc_vals); peak_d=fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
+        summary = "**"+str(horizon)+"-Day Forecast — "+label+"**\n\n| Metric | Value |\n|---|---|\n| Total | **${:,.2f}".format(total)+"** |\n| Daily Avg | **${:,.2f}".format(avg)+"** |\n| Peak | **${:,.2f}".format(peak)+" on "+peak_d+"** |"
+        return fig, summary
+    except Exception as e:
+        err_fig = go.Figure().update_layout(**dark("Forecast error: "+str(e),height=480))
+        return err_fig, "Error: "+str(e)
 def update_seg_choices(seg_type):
     if seg_type == 'Overall': return gr.update(choices=['All'],value='All')
     elif seg_type == 'By Complex': return gr.update(choices=COMPLEXES,value=COMPLEXES[0])
@@ -175,10 +194,40 @@ def route_intent(message):
         if br.lower() in m:
             sub=df[df['brand']==br]; return br+": ${:,.2f}".format(sub['actual_revenue_usd'].sum())
     return None
+def build_system_prompt():
+    df = get_df()
+    if df.empty: return "No data loaded. Tell the user to refresh data."
+    cx_rev = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
+    br_rev = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
+    cx_bud = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if 'budget_usd' in df.columns else None
+    date_range = df['date'].min().strftime('%b %d, %Y')+" to "+df['date'].max().strftime('%b %d, %Y')
+    cx_lines = "\n".join(["- "+cx+": ${:,.0f}".format(v)+((" (budget achievement: {:.1f}%)".format(cx_bud[cx])) if cx_bud is not None and cx in cx_bud else "") for cx,v in cx_rev.items()])
+    br_lines = "\n".join(["- "+br+": ${:,.0f}".format(v) for br,v in br_rev.items()])
+    top_cx = cx_rev.idxmax(); top_br = br_rev.idxmax()
+    total = df['actual_revenue_usd'].sum()
+    bud_ach = (total / df['budget_usd'].sum() * 100) if 'budget_usd' in df.columns and df['budget_usd'].sum()>0 else None
+    return f"""You are a QSR operations intelligence assistant for Savanna QSR Group, Zimbabwe.
+You have access to live operational data from {len(df)} records covering {date_range}.
+
+TOTAL REVENUE: ${total:,.2f}{(" (budget achievement: {:.1f}%)".format(bud_ach)) if bud_ach else ""}
+TOP COMPLEX: {top_cx}
+TOP BRAND: {top_br}
+
+REVENUE BY COMPLEX:
+{cx_lines}
+
+REVENUE BY BRAND:
+{br_lines}
+
+COMPLEXES: {', '.join(COMPLEXES)}
+BRANDS: {', '.join(BRANDS)}
+
+Answer questions directly and concisely using the data above. Use $ formatting for all revenue figures. If asked which is best/top/highest, use the data provided to give a specific answer."""
+
 def chat(message, history):
     if not message or not message.strip(): return ""
-    data_answer = route_intent(message); df = get_df()
-    system = "You are an intelligence assistant for Savanna QSR Group, Zimbabwe. Data: "+str(len(df))+" rows. Revenue: ${:,.2f}".format(df['actual_revenue_usd'].sum())+". Complexes: "+', '.join(COMPLEXES)+". Brands: "+', '.join(BRANDS)+". Be concise." if not df.empty else "No data loaded."
+    data_answer = route_intent(message)
+    system = build_system_prompt()
     messages = [{"role":"system","content":system}]
     for h in (history or []):
         if isinstance(h, dict): messages.append({"role":h["role"],"content":h["content"]})
@@ -218,6 +267,7 @@ with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
             with gr.Row(): ch3=gr.Plot(show_label=False); ch4=gr.Plot(show_label=False)
             with gr.Row(): ch5=gr.Plot(show_label=False); ch6=gr.Plot(show_label=False)
             dash_btn.click(build_dashboard,[period_sel],[ch1,ch2,ch3,ch4,ch5,ch6])
+            period_sel.change(build_dashboard,[period_sel],[ch1,ch2,ch3,ch4,ch5,ch6])
             refresh_btn.click(refresh_data,[],[kpi_header,refresh_msg])
         with gr.TabItem("Forecast"):
             with gr.Row():
