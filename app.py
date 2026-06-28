@@ -440,9 +440,11 @@ TOOLS = [
         }}}},
     {"type": "function", "function": {
         "name": "q_customer_metrics",
-        "description": "Customer count and average spend per customer. Use for 'avg spend', 'customer turnover', 'foot traffic', 'footfall', 'spend per customer'.",
+        "description": "Customer count and average spend per customer. Use for 'avg spend', 'customer turnover', 'foot traffic', 'footfall', 'spend per customer', or 'how many customers on [date]'.",
         "parameters": {"type": "object", "properties": {
-            "complex_name": {"type": "string", "description": "Filter to one complex, or omit for all."}
+            "complex_name": {"type": "string", "description": "Filter to one complex, or omit for all."},
+            "brand_name":   {"type": "string", "description": "Filter to one brand, or omit for all."},
+            "date":         {"type": "string", "description": "Specific date YYYY-MM-DD, or omit for full range."}
         }}}},
     {"type": "function", "function": {
         "name": "q_prior_period_comparison",
@@ -608,19 +610,35 @@ def _tool_q_budget_achievement(dff, threshold_pct=90, complex_name=None):
             "threshold_pct": threshold_pct, "sites_below_threshold": below,
             "all_complexes": sorted(cx, key=lambda x: -x['achievement_pct'])}
 
-def _tool_q_customer_metrics(dff, complex_name=None):
-    df = dff[dff['complex']==complex_name] if complex_name else dff
+def _tool_q_customer_metrics(dff, complex_name=None, brand_name=None, date=None):
+    import pandas as _pd
+    df = dff.copy()
+    # Apply date filter first
+    if date:
+        try:
+            target = _pd.to_datetime(date).date()
+            df = df[df['date'].dt.date == target]
+        except: pass
+    if complex_name: df = df[df['complex']==complex_name]
+    if brand_name:   df = df[df['brand']==brand_name]
     if 'customer_count' not in df.columns or df['customer_count'].sum()==0:
-        return {"error": "No customer count data available."}
+        return {"error": "No customer count data available for this filter."}
     df = df[df['customer_count']>0]
-    if complex_name:
-        avg = df['actual_revenue_usd'].sum()/df['customer_count'].sum()
-        return {"complex": complex_name, "total_customers": int(df['customer_count'].sum()),
-                "avg_spend_per_customer_usd": round(avg,2)}
-    cx = df.groupby('complex').apply(lambda x: round(x['actual_revenue_usd'].sum()/x['customer_count'].sum(),2)).sort_values(ascending=False)
-    return {"total_customers": int(df['customer_count'].sum()),
-            "avg_spend_by_complex": {k: v for k,v in cx.items()},
-            "overall_avg_usd": round(df['actual_revenue_usd'].sum()/df['customer_count'].sum(),2)}
+    period = date if date else "all time"
+    total_rev = df['actual_revenue_usd'].sum()
+    total_cust = int(df['customer_count'].sum())
+    avg = round(total_rev / total_cust, 2) if total_cust > 0 else 0
+    result = {"period": period, "total_customers": total_cust,
+              "total_revenue_usd": round(total_rev, 2),
+              "avg_spend_per_customer_usd": avg}
+    if complex_name: result["complex"] = complex_name
+    if brand_name:   result["brand"] = brand_name
+    if not complex_name and not date:
+        cx = df.groupby('complex').apply(
+            lambda x: round(x['actual_revenue_usd'].sum()/x['customer_count'].sum(),2)
+        ).sort_values(ascending=False)
+        result["avg_spend_by_complex"] = {k: v for k,v in cx.items()}
+    return result
 
 def _tool_q_prior_period_comparison(dff, comparison):
     col = 'prior_month_actual' if comparison=='prior_month' else 'prior_year_actual'
