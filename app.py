@@ -1,416 +1,822 @@
-import os, json, time, warnings
+import os
+import base64
 import gradio as gr
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-
-from datetime import datetime, timedelta
-import requests as _http
+from openai import OpenAI
+import warnings
 warnings.filterwarnings('ignore')
-# ── Gradio 5.9.1 schema bug fix ──────────────────────────────────────────────
-try:
-    import gradio_client.utils as _gcu
-    _orig_j2p = _gcu._json_schema_to_python_type
-    def _safe_j2p(schema, defs):
-        if not isinstance(schema, dict): return "any"
-        try: return _orig_j2p(schema, defs)
-        except Exception: return "any"
-    _gcu._json_schema_to_python_type = _safe_j2p
-except Exception: pass
-# ─────────────────────────────────────────────────────────────────────────────
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-GROWTH_RATE = 0.05
-CACHE_TTL = 300
-_cache = {'df': pd.DataFrame(), 'loaded_at': 0}
-COMPLEXES = ['Westgate Mall','City Centre','Eastpark','Northgate']
-BRANDS = ['Flame & Grill','Pie Palace','Chill Creamery','Sizzle Wings']
-COLORS = ['#c9a84c','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e67e22']
+# ═══════════════════════════════════════════════════════════════
+# DATA LOAD
+# ═══════════════════════════════════════════════════════════════
+DATA_URL = "https://github.com/SYLVESTER1922/QSR/raw/refs/heads/main/simbisa_kenya_master_published.csv"
+df = pd.read_csv(DATA_URL)
+df['date'] = pd.to_datetime(df['date'])
+df = df.sort_values('date').reset_index(drop=True)
 
-def load_data():
-    if not SUPABASE_URL or not SUPABASE_KEY: print("SUPABASE not configured"); return pd.DataFrame()
-    try:
-        r = _http.get(SUPABASE_URL+"/rest/v1/daily_input?select=*&order=date&limit=10000", headers={"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY})
-        if r.status_code!=200: print("HTTP "+str(r.status_code)); return pd.DataFrame()
-        data=r.json()
-        if not data: return pd.DataFrame()
-        df = pd.DataFrame(data)
-        for c in ['budget_usd','actual_revenue_usd','prior_month_actual','prior_year_actual','customer_count','counters_open','variance_vs_budget','avg_spend_per_cust','revenue_per_counter','is_holiday','variance_pct','vs_prior_month_pct','vs_prior_year_pct']:
-            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-        if 'date' in df.columns: df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        df = df.dropna(subset=['date','actual_revenue_usd']).copy()
-        df = df[df['actual_revenue_usd'] > 0].copy()
-        print("Loaded "+str(len(df))+" rows from Supabase")
-        return df.sort_values('date').reset_index(drop=True)
-    except Exception as e: print("Load error: "+str(e)); return pd.DataFrame()
-def get_df():
-    now = time.time()
-    if now - _cache['loaded_at'] > CACHE_TTL or _cache['df'].empty:
-        fresh = load_data()
-        if not fresh.empty: _cache['df'] = fresh; _cache['loaded_at'] = now
-    return _cache['df']
-def refresh_data():
-    _cache['loaded_at'] = 0; fresh = get_df()
-    if fresh.empty: return build_kpi_html(), "No data"
-    return build_kpi_html(), "Refreshed: "+str(len(fresh))+" rows ("+fresh['date'].min().strftime('%b %d, %Y')+" to "+fresh['date'].max().strftime('%b %d, %Y')+")"
-print("Loading from Supabase..."); _ = get_df()
-def fmt(v):
-    if v >= 1e6: return "${:.2f}M".format(v/1e6)
-    if v >= 1e3: return "${:.0f}K".format(v/1e3)
-    return "${:,.0f}".format(v)
-def dark(title, height=360):
-    return dict(title=dict(text=title,font=dict(color='#c9a84c',size=14)),paper_bgcolor='#0a1628',plot_bgcolor='#0d1f38',font=dict(color='#c8d8f0',family='Arial',size=11),height=height,xaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),yaxis=dict(gridcolor='#1a3a6e',linecolor='#1a3a6e',tickfont=dict(color='#c8d8f0')),legend=dict(bgcolor='rgba(10,22,40,0.85)',bordercolor='#1a3a6e',borderwidth=1,font=dict(color='#c8d8f0')))
-def build_kpi_html(dff=None):
-    if dff is None:
-        dff = get_df()
-    if dff.empty:
-        tr,ap,tc,tb,dr = "--","--","--","--","No data"
-    else:
-        tr = fmt(dff['actual_revenue_usd'].sum())
-        bud = dff['budget_usd'].sum() if 'budget_usd' in dff.columns else 0
-        ap = "{:.1f}%".format(dff['actual_revenue_usd'].sum()/bud*100) if bud > 0 else "--"
-        tc = dff.groupby('complex')['actual_revenue_usd'].sum().idxmax()
-        tb = dff.groupby('brand')['actual_revenue_usd'].sum().idxmax()
-        dr = dff['date'].min().strftime('%b %d')+" - "+dff['date'].max().strftime('%b %d, %Y')
-    return '<div style="background:linear-gradient(135deg,#0d1b2a,#1a3a5c);padding:18px 28px 16px;border-radius:12px;margin-bottom:4px;border-left:4px solid #c9a84c;"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;"><div><h1 style="color:#fff;margin:0;font-size:22px;">Savanna QSR Intelligence</h1><p style="color:#aed6f1;margin:4px 0 0;font-size:13px;">Live Operations Intelligence - Zimbabwe</p></div><div style="text-align:right;"><p style="color:#c9a84c;margin:0;font-size:10px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p></div></div><div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;"><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tr+'</div><div style="color:#7fb3d3;font-size:11px;">Total Revenue</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+ap+'</div><div style="color:#7fb3d3;font-size:11px;">Budget Achievement</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tc+'</div><div style="color:#7fb3d3;font-size:11px;">Top Complex</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#c9a84c;font-size:18px;font-weight:700;">'+tb+'</div><div style="color:#7fb3d3;font-size:11px;">Top Brand</div></div><div style="background:rgba(10,22,40,0.7);padding:10px 18px;border-radius:8px;border:1px solid #1a3a6e;text-align:center;"><div style="color:#7fb3d3;font-size:16px;font-weight:700;">'+dr+'</div><div style="color:#7fb3d3;font-size:11px;">Data Range</div></div></div></div>'
-def build_dashboard(period):
-    df = get_df()
-    if df.empty:
-        e = go.Figure().update_layout(**dark("No data - click Refresh")); return [build_kpi_html()]+[e]*6
-    dff = df.copy(); latest = dff['date'].max()
-    if period == 'Last 7 Days': dff = dff[dff['date'] >= latest - timedelta(days=7)]
-    elif period == 'Last 30 Days': dff = dff[dff['date'] >= latest - timedelta(days=30)]
-    elif period == 'Last 90 Days': dff = dff[dff['date'] >= latest - timedelta(days=90)]
-    elif period == 'MTD': dff = dff[(dff['date'].dt.month==latest.month)&(dff['date'].dt.year==latest.year)]
-    cx = dff.groupby('complex').agg(actual=('actual_revenue_usd','sum'),budget=('budget_usd','sum')).reset_index().sort_values('actual',ascending=True)
-    fig1 = go.Figure()
-    fig1.add_trace(go.Bar(name='Budget',x=cx['budget'],y=cx['complex'],orientation='h',marker=dict(color='#2a4a8a',line=dict(color='#c9a84c',width=1)),opacity=0.6))
-    fig1.add_trace(go.Bar(name='Actual',x=cx['actual'],y=cx['complex'],orientation='h',marker=dict(color='#c9a84c',line=dict(color='#1e2d5e',width=1)),text=[fmt(v) for v in cx['actual']],textposition='inside',insidetextanchor='middle',textfont=dict(color='#0a1628',size=12,family='Arial',weight='bold')))
-    fig1.update_layout(**dark("Revenue by Complex",height=300),barmode='overlay',margin=dict(l=140,r=120,t=50,b=40))
-    br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd',ascending=True)
-    fig2 = go.Figure(go.Bar(x=br['actual_revenue_usd'],y=br['brand'],orientation='h',marker=dict(color=['#1e2d5e','#c9a84c','#1abc9c','#e74c3c','#9b59b6','#2ecc71','#e67e22','#3498db'][:len(br)],line=dict(color='#c9a84c',width=1)),text=[fmt(v) for v in br['actual_revenue_usd']],textposition='inside',insidetextanchor='middle',textfont=dict(color='#ffffff',size=12,family='Arial',weight='bold')))
-    fig2.update_layout(**dark("Revenue by Brand",height=280),margin=dict(l=140,r=120,t=50,b=40))
-    daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
-    fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(x=daily['date'],y=daily['actual_revenue_usd'],name='Actual',line=dict(color='#c9a84c',width=2.5),fill='tozeroy',fillcolor='rgba(201,168,76,0.08)'))
-    fig3.update_layout(**dark("Daily Revenue Trend",height=360),hovermode='x unified',showlegend=False,margin=dict(l=90,r=40,t=50,b=50),yaxis_tickprefix="$",yaxis_tickformat=",.0f")
-    if 'customer_count' in dff.columns:
-        avs = dff[dff['customer_count']>0].groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).reset_index(name='avg').sort_values('avg',ascending=True)
-        fig4 = go.Figure(go.Bar(x=avs['avg'],y=avs['complex'],orientation='h',marker_color='#2ecc71',text=["${:.2f}".format(v) for v in avs['avg']],textposition='outside',textfont=dict(color='#c8d8f0',size=11)))
-        fig4.update_layout(**dark("Avg Spend Per Customer",height=280),margin=dict(l=140,r=120,t=50,b=40))
-    else: fig4 = go.Figure().update_layout(**dark("No customer data",height=280))
-    try:
-        heat = dff.groupby(['complex','brand']).apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).reset_index(name='ach')
-        pivot = heat.pivot(index='complex',columns='brand',values='ach')
-        fig5 = go.Figure(go.Heatmap(z=pivot.values,x=pivot.columns.tolist(),y=pivot.index.tolist(),colorscale=[[0,'#c0392b'],[0.8,'#f39c12'],[1,'#2ecc71']],zmid=100,zmin=70,zmax=120,text=[["{:.1f}%".format(v) for v in row] for row in pivot.values],texttemplate="%{text}",textfont=dict(color='white',size=12)))
-        fig5.update_layout(**dark("Budget Achievement %",height=280),margin=dict(l=130,r=60,t=50,b=80))
-    except: fig5 = go.Figure().update_layout(**dark("Heatmap error",height=280))
-    comp_cols = {'actual':'actual_revenue_usd'}
-    if 'prior_month_actual' in dff.columns: comp_cols['sdlm'] = 'prior_month_actual'
-    if 'prior_year_actual' in dff.columns: comp_cols['sdly'] = 'prior_year_actual'
-    comp = dff.groupby('complex')[list(comp_cols.values())].sum().reset_index()
-    fig6 = go.Figure()
-    cmap = {'sdly':'#1e2d5e','sdlm':'#1abc9c','actual':'#c9a84c'}
-    lmap = {'sdly':'Prior Year','sdlm':'Prior Month','actual':'This Period'}
-    for key, col in comp_cols.items():
-        if col in comp.columns: fig6.add_trace(go.Bar(name=lmap[key],x=comp['complex'],y=comp[col],marker_color=cmap[key],text=[fmt(v) for v in comp[col]],textposition='outside',textfont=dict(color='#c8d8f0',size=10)))
-    fig6.update_layout(**dark("Actual vs Prior Periods",height=340),barmode='group',hovermode='x unified',margin=dict(l=60,r=40,t=50,b=60))
-    return build_kpi_html(dff), fig1, fig2, fig3, fig4, fig5, fig6
-def generate_forecast(seg_type, seg_name, horizon):
-    try:
-        df = get_df()
-        if df.empty: return go.Figure().update_layout(**dark("No data")), "No data."
-        horizon = int(horizon)
-        if seg_type == 'Overall':
-            seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-            label = 'All Complexes'
-        elif seg_type == 'By Complex':
-            seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-            label = seg_name
-        elif seg_type == 'By Brand':
-            seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
-            label = seg_name
-        else:
-            parts = seg_name.split(' | ')
-            if len(parts)==2:
-                seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index()
-            else:
-                seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
-            label = seg_name
-        seg.columns = ['date','revenue']
-        seg = seg.sort_values('date').reset_index(drop=True)
-        if len(seg) < 7:
-            return go.Figure().update_layout(**dark("Need 7+ days of data for this segment")), "Insufficient data for this segment."
-        last_date = seg['date'].max()
-        base = seg['revenue'].tail(min(horizon, len(seg))).mean()
-        if pd.isna(base) or base <= 0: base = seg['revenue'].mean()
-        DOW = {0:0.85,1:0.90,2:0.92,3:0.95,4:1.05,5:1.20,6:1.15}
-        fc_dates = [last_date + timedelta(days=i+1) for i in range(horizon)]
-        fc_vals = [round(float(base) * DOW[d.weekday()] * (1+GROWTH_RATE), 2) for d in fc_dates]
-        upper = [v*1.15 for v in fc_vals]; lower = [v*0.85 for v in fc_vals]
-        last_date_str = str(last_date)[:10]
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=seg['date'],y=seg['revenue'],name='Historical',line=dict(color='#4a7aae',width=1.2),opacity=0.85))
-        fig.add_trace(go.Scatter(x=fc_dates+fc_dates[::-1],y=upper+lower[::-1],fill='toself',fillcolor='rgba(201,168,76,0.18)',line=dict(color='rgba(0,0,0,0)'),name='Confidence',hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=fc_dates,y=fc_vals,name=str(horizon)+'-Day Forecast',line=dict(color='#c9a84c',width=2.5,dash='dash'),mode='lines+markers',marker=dict(size=4,color='#c9a84c')))
-        fig.add_vline(x=last_date_str,line_dash='dot',line_color='#c9a84c',opacity=0.6)
-        fig.update_layout(**dark(label+" - "+str(horizon)+"-Day Forecast",height=480),hovermode='x unified',margin=dict(l=70,r=40,t=70,b=50))
-        total=sum(fc_vals); avg=total/horizon; peak=max(fc_vals); peak_d=fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
-        summary = "**"+str(horizon)+"-Day Forecast — "+label+"**\n\n| Metric | Value |\n|---|---|\n| Total | **${:,.2f}".format(total)+"** |\n| Daily Avg | **${:,.2f}".format(avg)+"** |\n| Peak | **${:,.2f}".format(peak)+" on "+peak_d+"** |"
-        return fig, summary
-    except Exception as e:
-        err_fig = go.Figure().update_layout(**dark("Forecast error: "+str(e),height=480))
-        return err_fig, "Error: "+str(e)
-def update_seg_choices(seg_type):
-    if seg_type == 'Overall': return gr.update(choices=['All'],value='All')
-    elif seg_type == 'By Complex': return gr.update(choices=COMPLEXES,value=COMPLEXES[0])
-    elif seg_type == 'By Brand': return gr.update(choices=BRANDS,value=BRANDS[0])
-    else:
-        opts = [cx+" | "+br for cx in COMPLEXES for br in BRANDS]
-        return gr.update(choices=opts,value=opts[0])
-def route_intent(message):
-    df = get_df()
-    if df.empty: return None
-    m = message.lower()
-    latest = df['date'].max()
+forecasts_df = pd.read_csv('qsr_forecasts.csv')
+forecasts_df['ds'] = pd.to_datetime(forecasts_df['ds'])
 
-    # Budget / underperformance
-    if any(x in m for x in ['underperform','below budget','struggling','worst','attention','concern','risk']):
-        if 'budget_usd' not in df.columns: return "No budget data available."
-        recent = df[df['date'] >= latest - timedelta(days=7)]
-        perf = recent.groupby(['complex','brand']).apply(
-            lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum() if x['budget_usd'].sum()>0 else 1
-        ).reset_index(name='ach')
-        under = perf[perf['ach']<0.90].sort_values('ach')
-        if under.empty: return "All sites above 90% budget achievement in last 7 days."
-        return "Below 90% budget (last 7 days):\n" + "\n".join(
-            ["- {}/{}: {:.1f}%".format(r.complex,r.brand,r.ach*100) for r in under.itertuples()])
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    if any(x in m for x in ['budget','achievement','variance','target']):
-        if 'budget_usd' not in df.columns: return "No budget data."
-        overall = df['actual_revenue_usd'].sum()/df['budget_usd'].sum()*100 if df['budget_usd'].sum()>0 else 0
-        cx_ach = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
-        br_ach = df.groupby('brand').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0).sort_values(ascending=False)
-        return "Overall budget achievement: {:.1f}%\nBy complex:\n{}\nBy brand:\n{}".format(
-            overall,
-            "\n".join(["- {}: {:.1f}%".format(cx,v) for cx,v in cx_ach.items()]),
-            "\n".join(["- {}: {:.1f}%".format(br,v) for br,v in br_ach.items()]))
+RELIABLE_SITES = [
+    'Crossroads Mall', 'Junction Plaza', 'Piazza Court',
+    'Garden Court', 'Metro Market', 'Bon Marche Plaza'
+]
+BRANDS = df['brand'].unique().tolist()
 
-    # Prior period comparisons
-    if any(x in m for x in ['prior month','last month','sdlm','vs month','month on month']):
-        if 'prior_month_actual' not in df.columns: return "No prior month data."
-        act=df['actual_revenue_usd'].sum(); pm=df['prior_month_actual'].sum()
-        cx = df.groupby('complex').agg(actual=('actual_revenue_usd','sum'),pm=('prior_month_actual','sum'))
-        lines = ["vs Prior Month — Overall: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(act,pm,(act-pm)/pm*100 if pm else 0)]
-        lines += ["- {}: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(r.Index,r.actual,r.pm,(r.actual-r.pm)/r.pm*100 if r.pm else 0) for r in cx.itertuples()]
-        return "\n".join(lines)
+SEGMENT_COLORS = {
+    'All Sites & Brands': '#c9a84c',
+    'Crust Co.':          '#c9a84c',
+    'Flame & Feather':    '#2ecc71',
+    'Cala Grill':         '#e74c3c',
+    'Frostbite Creamery': '#9b59b6',
+    'Crossroads Mall':    '#c9a84c',
+    'Junction Plaza':     '#2ecc71',
+    'Piazza Court':       '#e74c3c',
+    'Garden Court':       '#1abc9c',
+    'Metro Market':       '#9b59b6',
+    'Bon Marche Plaza':   '#f39c12',
+}
 
-    if any(x in m for x in ['prior year','last year','sdly','vs year','year on year']):
-        if 'prior_year_actual' not in df.columns: return "No prior year data."
-        act=df['actual_revenue_usd'].sum(); py=df['prior_year_actual'].sum()
-        cx = df.groupby('complex').agg(actual=('actual_revenue_usd','sum'),py=('prior_year_actual','sum'))
-        lines = ["vs Prior Year — Overall: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(act,py,(act-py)/py*100 if py else 0)]
-        lines += ["- {}: ${:,.0f} vs ${:,.0f} ({:+.1f}%)".format(r.Index,r.actual,r.py,(r.actual-r.py)/r.py*100 if r.py else 0) for r in cx.itertuples()]
-        return "\n".join(lines)
-
-    # Daily / weekly / period summaries
-    if any(x in m for x in ['yesterday','today','latest day','last day']):
-        day = df[df['date']==latest]
-        if day.empty: return "No data for {}.".format(latest.strftime('%b %d'))
-        rev = day['actual_revenue_usd'].sum()
-        bud = day['budget_usd'].sum() if 'budget_usd' in day.columns else 0
-        ach = " ({:.1f}% of budget)".format(rev/bud*100) if bud>0 else ""
-        cx_b = "\n".join(["  - {}: ${:,.0f}".format(r.complex,r.actual_revenue_usd) for r in day.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-        return "{} revenue: ${:,.0f}{}\nBy complex:\n{}".format(latest.strftime('%b %d'),rev,ach,cx_b)
-
-    if any(x in m for x in ['7-day','7 day','last week','this week','weekly','week']):
-        w = df[df['date'] >= latest - timedelta(days=7)]
-        total = w['actual_revenue_usd'].sum(); davg = w.groupby('date')['actual_revenue_usd'].sum().mean()
-        bud = w['budget_usd'].sum() if 'budget_usd' in w.columns else 0
-        ach = " ({:.1f}% of budget)".format(total/bud*100) if bud>0 else ""
-        cx_b = "\n".join(["  - {}: ${:,.0f}".format(r.complex,r.actual_revenue_usd) for r in w.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-        return "Last 7 days: ${:,.0f} total{}, avg ${:,.0f}/day\nBy complex:\n{}".format(total,ach,davg,cx_b)
-
-    if any(x in m for x in ['30-day','30 day','this month','monthly','month to date','mtd']):
-        w = df[df['date'] >= latest - timedelta(days=30)]
-        total = w['actual_revenue_usd'].sum()
-        bud = w['budget_usd'].sum() if 'budget_usd' in w.columns else 0
-        ach = " ({:.1f}% of budget)".format(total/bud*100) if bud>0 else ""
-        return "Last 30 days: ${:,.0f} total{}".format(total,ach)
-
-    # Customer metrics
-    if any(x in m for x in ['customer','spend per','avg spend','average spend','foot traffic','footfall']):
-        if 'customer_count' not in df.columns or df['customer_count'].sum()==0:
-            return "No customer count data available."
-        avs = df[df['customer_count']>0].groupby('complex').apply(
-            lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()).sort_values(ascending=False)
-        total_c = int(df['customer_count'].sum())
-        return "Total customers: {:,}\nAvg spend per customer:\n{}".format(
-            total_c, "\n".join(["- {}: ${:.2f}".format(cx,v) for cx,v in avs.items()]))
-
-    # Counter / throughput
-    if any(x in m for x in ['counter','till','throughput','revenue per counter']):
-        if 'revenue_per_counter' not in df.columns: return "No counter data."
-        rpc = df[df['revenue_per_counter']>0].groupby('complex')['revenue_per_counter'].mean().sort_values(ascending=False)
-        return "Revenue per counter:\n" + "\n".join(["- {}: ${:,.0f}".format(cx,v) for cx,v in rpc.items()])
-
-    # Day of week
-    if any(x in m for x in ['best day','peak day','busiest','day of week','highest day']):
-        dow = df.groupby(df['date'].dt.day_name())['actual_revenue_usd'].mean()
-        order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-        dow = dow.reindex([d for d in order if d in dow.index])
-        return "Average daily revenue by day:\n" + "\n".join(
-            ["- {}: ${:,.0f}".format(d,v) for d,v in dow.sort_values(ascending=False).items()])
-
-    # Rankings
-    if any(x in m for x in ['rank','ranking','all complex','all brand','compare all','overview']):
-        cx = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
-        br = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
-        bud_cx = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if 'budget_usd' in x.columns and x['budget_usd'].sum()>0 else 0) if 'budget_usd' in df.columns else None
-        cx_lines = "\n".join(["{}. {}: ${:,.0f}{}".format(i+1,n,v," ({:.0f}% bud)".format(bud_cx[n]) if bud_cx is not None else "") for i,(n,v) in enumerate(cx.items())])
-        br_lines = "\n".join(["{}. {}: ${:,.0f}".format(i+1,n,v) for i,(n,v) in enumerate(br.items())])
-        return "Complex ranking:\n{}\n\nBrand ranking:\n{}".format(cx_lines,br_lines)
-
-    # Top / bottom
-    if any(x in m for x in ['top','best','highest','leading','number one','#1']):
-        g_cx=df.groupby('complex')['actual_revenue_usd'].sum(); g_br=df.groupby('brand')['actual_revenue_usd'].sum()
-        return "Top complex: {} (${:,.0f})\nTop brand: {} (${:,.0f})".format(g_cx.idxmax(),g_cx.max(),g_br.idxmax(),g_br.max())
-
-    if any(x in m for x in ['worst','lowest','bottom','poor','weakest']):
-        g_cx=df.groupby('complex')['actual_revenue_usd'].sum(); g_br=df.groupby('brand')['actual_revenue_usd'].sum()
-        return "Lowest complex: {} (${:,.0f})\nLowest brand: {} (${:,.0f})".format(g_cx.idxmin(),g_cx.min(),g_br.idxmin(),g_br.min())
-
-    if any(x in m for x in ['total revenue','overall revenue','total']):
-        bud = df['budget_usd'].sum() if 'budget_usd' in df.columns else 0
-        ach = " ({:.1f}% of budget)".format(df['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
-        return "Total revenue: ${:,.0f}{} across {:,} records".format(df['actual_revenue_usd'].sum(),ach,len(df))
-
-    # Complex × Brand cross-query
-    for cx in COMPLEXES:
-        for br in BRANDS:
-            if cx.lower() in m and br.lower() in m:
-                sub=df[(df['complex']==cx)&(df['brand']==br)]
-                if not sub.empty:
-                    bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
-                    ach=" ({:.1f}% budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
-                    return "{}/{}: ${:,.0f} total{}, ${:,.0f}/day avg".format(
-                        cx,br,sub['actual_revenue_usd'].sum(),ach,sub['actual_revenue_usd'].mean())
-
-    for cx in COMPLEXES:
-        if cx.lower() in m:
-            sub=df[df['complex']==cx]
-            bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
-            ach=" ({:.1f}% of budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
-            br_b="\n".join(["  - {}: ${:,.0f}".format(r.brand,r.actual_revenue_usd) for r in sub.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False).reset_index().itertuples()])
-            return "{}: ${:,.0f} total{}\nBy brand:\n{}".format(cx,sub['actual_revenue_usd'].sum(),ach,br_b)
-
-    for br in BRANDS:
-        if br.lower() in m:
-            sub=df[df['brand']==br]
-            bud=sub['budget_usd'].sum() if 'budget_usd' in sub.columns else 0
-            ach=" ({:.1f}% of budget)".format(sub['actual_revenue_usd'].sum()/bud*100) if bud>0 else ""
-            return "{}: ${:,.0f} total{}".format(br,sub['actual_revenue_usd'].sum(),ach)
-
+# ── Logo: load as base64 so it works on any deployment ─────────
+def load_logo_b64():
+    for fname in ['NI_logo.png', 'NI logo.png', 'ni_logo.png']:
+        if os.path.exists(fname):
+            with open(fname, 'rb') as f:
+                return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
     return None
-def build_system_prompt():
-    df = get_df()
-    if df.empty: return "No data loaded. Tell the user to refresh data."
-    cx_rev = df.groupby('complex')['actual_revenue_usd'].sum().sort_values(ascending=False)
-    br_rev = df.groupby('brand')['actual_revenue_usd'].sum().sort_values(ascending=False)
-    has_bud = 'budget_usd' in df.columns and df['budget_usd'].sum() > 0
-    cx_bud = df.groupby('complex').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if has_bud else None
-    br_bud = df.groupby('brand').apply(lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100 if x['budget_usd'].sum()>0 else 0) if has_bud else None
-    date_range = df['date'].min().strftime('%b %d, %Y')+" to "+df['date'].max().strftime('%b %d, %Y')
-    cx_lines = "\n".join(["- "+cx+": ${:,.0f}".format(v)+((" ({:.1f}% of budget)".format(cx_bud[cx])) if cx_bud is not None and cx in cx_bud else "") for cx,v in cx_rev.items()])
-    br_lines = "\n".join(["- "+br+": ${:,.0f}".format(v)+((" ({:.1f}% of budget)".format(br_bud[br])) if br_bud is not None and br in br_bud else "") for br,v in br_rev.items()])
-    top_cx = cx_rev.idxmax(); top_br = br_rev.idxmax()
-    total = df['actual_revenue_usd'].sum()
-    bud_ach = (total / df['budget_usd'].sum() * 100) if 'budget_usd' in df.columns and df['budget_usd'].sum()>0 else None
-    return f"""You are a QSR operations intelligence assistant for Savanna QSR Group, Zimbabwe.
-You have access to live operational data from {len(df)} records covering {date_range}.
 
-TOTAL REVENUE: ${total:,.2f}{(" (budget achievement: {:.1f}%)".format(bud_ach)) if bud_ach else ""}
-TOP COMPLEX: {top_cx}
-TOP BRAND: {top_br}
+LOGO_B64 = load_logo_b64()
+LOGO_HTML = f'<img src="{LOGO_B64}" style="height:58px;width:auto;object-fit:contain;border-radius:6px;" alt="NI"/>' if LOGO_B64 else '<div style="width:58px;height:58px;background:#c9a84c;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#0a1628;font-size:14px;">NI</div>'
 
-REVENUE BY COMPLEX:
-{cx_lines}
+
+def hex_to_rgba(hex_color, alpha=0.15):
+    hex_color = hex_color.lstrip('#')
+    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    return f'rgba({r},{g},{b},{alpha})'
+
+def fmt_val(v):
+    if v >= 1_000_000:
+        return f"${v/1_000_000:.2f}M"
+    elif v >= 1_000:
+        return f"${v/1_000:.0f}K"
+    return f"${v:,.0f}"
+
+def dark_layout(title, height=350, margin=None):
+    m = margin or dict(l=70, r=60, t=55, b=50)
+    return dict(
+        title=dict(text=title, font=dict(color='#c9a84c', size=14, family='Arial')),
+        paper_bgcolor='#0a1628',
+        plot_bgcolor='#0d1f38',
+        font=dict(color='#c8d8f0', family='Arial', size=12),
+        height=height,
+        margin=m,
+        xaxis=dict(
+            gridcolor='#1a3a6e', linecolor='#1a3a6e',
+            tickfont=dict(color='#c8d8f0', size=11),
+            title_font=dict(color='#a8c8f0', size=12)
+        ),
+        yaxis=dict(
+            gridcolor='#1a3a6e', linecolor='#1a3a6e',
+            tickfont=dict(color='#c8d8f0', size=11),
+            title_font=dict(color='#a8c8f0', size=12)
+        ),
+        legend=dict(
+            bgcolor='rgba(10,22,40,0.85)',
+            bordercolor='#1a3a6e', borderwidth=1,
+            font=dict(color='#c8d8f0', size=11)
+        ),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# TAB 1 — FORECASTING
+# ═══════════════════════════════════════════════════════════════
+
+def generate_forecast(segment_type, segment_name, horizon):
+    try:
+        seg_map = {'Overall': 'overall', 'By Brand': 'brand', 'By Site': 'site'}
+        seg_key = seg_map.get(segment_type, 'overall')
+
+        fc = forecasts_df[
+            (forecasts_df['segment_type'] == seg_key) &
+            (forecasts_df['segment_name'] == segment_name)
+        ].copy().head(int(horizon))
+
+        if fc.empty:
+            fig = go.Figure()
+            fig.update_layout(**dark_layout("No forecast available for this selection"))
+            return fig, "⚠️ No forecast data found. Please select a different segment."
+
+        # Historical daily revenue
+        if seg_key == 'overall':
+            hist = df.groupby('date')['daily_revenue_usd'].sum().reset_index()
+        elif seg_key == 'brand':
+            hist = df[df['brand'] == segment_name].groupby('date')['daily_revenue_usd'].sum().reset_index()
+        else:
+            hist = df[df['site'] == segment_name].groupby('date')['daily_revenue_usd'].sum().reset_index()
+
+        hist = hist.sort_values('date').reset_index(drop=True)
+        hist.columns = ['ds', 'y']
+        color = SEGMENT_COLORS.get(segment_name, '#c9a84c')
+
+        fig = go.Figure()
+
+        # Historical line
+        fig.add_trace(go.Scatter(
+            x=hist['ds'], y=hist['y'],
+            name='Historical Revenue',
+            line=dict(color='#4a7aae', width=1.2),
+            mode='lines', opacity=0.9,
+            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Revenue: $%{y:,.0f}<extra>Historical</extra>'
+        ))
+
+        # Confidence band
+        fig.add_trace(go.Scatter(
+            x=pd.concat([fc['ds'], fc['ds'][::-1]]),
+            y=pd.concat([fc['yhat_upper'], fc['yhat_lower'][::-1]]),
+            fill='toself',
+            fillcolor=hex_to_rgba(color, 0.20),
+            line=dict(color='rgba(255,255,255,0)'),
+            name='Confidence Band',
+            hoverinfo='skip'
+        ))
+
+        # Forecast line
+        fig.add_trace(go.Scatter(
+            x=fc['ds'], y=fc['yhat'],
+            name=f'{horizon}-Day Forecast',
+            line=dict(color=color, width=2.5, dash='dash'),
+            mode='lines',
+            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Forecast: $%{y:,.0f}<extra>Forecast</extra>'
+        ))
+
+        # Forecast start line
+        fig.add_shape(
+            type="line",
+            x0=fc['ds'].min(), x1=fc['ds'].min(),
+            y0=0, y1=1, yref="paper",
+            line=dict(color=color, dash="dot", width=1.5)
+        )
+        fig.add_annotation(
+            x=fc['ds'].min(), y=0.97, yref="paper",
+            text="▶ Forecast Start", showarrow=False,
+            font=dict(color=color, size=11, family='Arial'),
+            bgcolor="rgba(10,22,40,0.75)", borderpad=4, xanchor="left"
+        )
+
+        if seg_key == 'overall':
+            fig.add_annotation(
+                x=0.01, y=0.04, xref="paper", yref="paper",
+                text="Note: Upward trend reflects additional sites opening throughout 2020–2021",
+                showarrow=False, font=dict(color='#7fb3d3', size=10),
+                bgcolor="rgba(10,22,40,0.65)", borderpad=3, xanchor="left"
+            )
+
+        layout = dark_layout(
+            f"{segment_name} — {horizon}-Day Revenue Forecast",
+            height=500, margin=dict(l=80, r=30, t=70, b=55)
+        )
+        layout['xaxis']['title'] = 'Date'
+        layout['yaxis']['title'] = 'Daily Revenue (USD)'
+        layout['yaxis']['tickprefix'] = '$'
+        layout['yaxis']['tickformat'] = ',.0f'
+        layout['legend'] = dict(
+            orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1,
+            bgcolor='rgba(10,22,40,0.8)', bordercolor='#1a3a6e', borderwidth=1,
+            font=dict(color='#c8d8f0', size=11)
+        )
+        layout['hovermode'] = 'x unified'
+        fig.update_layout(**layout)
+
+        total    = fc['yhat'].sum()
+        avg      = fc['yhat'].mean()
+        peak     = fc['yhat'].max()
+        peak_day = fc.loc[fc['yhat'].idxmax(), 'ds'].strftime('%b %d, %Y')
+        low      = fc['yhat'].min()
+        low_day  = fc.loc[fc['yhat'].idxmin(), 'ds'].strftime('%b %d, %Y')
+
+        summary = f"""**{horizon}-Day Forecast — {segment_name}**
+
+| Metric | Value |
+|---|---|
+| Predicted Total Revenue | **${total:,.2f}** |
+| Average Daily Revenue | **${avg:,.2f}** |
+| Peak Day | **${peak:,.2f}** on {peak_day} |
+| Lowest Day | **${low:,.2f}** on {low_day} |
+| Forecast Period | {fc['ds'].min().strftime('%b %d, %Y')} → {fc['ds'].max().strftime('%b %d, %Y')} |
+
+> *Forecast generated using Facebook Prophet trained on 2020–2021 data. Confidence band shows 80% prediction interval.*
+"""
+        return fig, summary
+
+    except Exception as ex:
+        fig = go.Figure()
+        fig.update_layout(**dark_layout(f"Error generating forecast: {ex}"))
+        return fig, f"⚠️ Error: {ex}"
+
+
+def update_segment_choices(segment_type):
+    if segment_type == 'Overall':
+        return gr.update(choices=['All Sites & Brands'], value='All Sites & Brands')
+    elif segment_type == 'By Brand':
+        return gr.update(choices=BRANDS, value=BRANDS[0])
+    else:
+        return gr.update(choices=RELIABLE_SITES, value=RELIABLE_SITES[0])
+
+
+# ═══════════════════════════════════════════════════════════════
+# TAB 2 — INTELLIGENCE CHAT
+# ═══════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = f"""You are a QSR revenue intelligence assistant for the Continental QSR Group, Nairobi Kenya.
+You have access to 2 years of verified daily revenue data (Jan 2020 to Dec 2021) across 8 sites and 4 brands.
+Answer questions clearly, concisely and professionally. Use $ formatting for all dollar amounts.
+Always be transparent about data limitations when relevant.
+
+KEY FACTS:
+- Total 2-year revenue: $15,868,509
+- Date range: Jan 2020 to Dec 2021
+- Brands: {', '.join(BRANDS)}
+- Sites: Crossroads Mall, Junction Plaza, Piazza Court, Garden Court, Metro Market, Nairobi Central, Bon Marche Plaza, Harbor Plaza
 
 REVENUE BY BRAND:
-{br_lines}
+- Crust Co.: $8,990,500 (57% of total — dominant brand, leads at 7 of 8 sites)
+- Flame & Feather: $3,750,907 (24% — leads only at Metro Market)
+- Cala Grill: $1,939,703 (12%)
+- Frostbite Creamery: $1,187,399 (7%)
 
-COMPLEXES: {', '.join(COMPLEXES)}
-BRANDS: {', '.join(BRANDS)}
+REVENUE BY SITE:
+- Junction Plaza: $4,821,962 (top site)
+- Crossroads Mall: $4,702,790 (close second)
+- Piazza Court: $2,720,070
+- Garden Court: $1,764,552
+- Metro Market: $720,592
+- Nairobi Central: $614,332
+- Bon Marche Plaza: $467,850
+- Harbor Plaza: $56,362 (smallest — just opened Dec 2021)
 
-Answer questions directly and concisely using the data above. Use $ formatting for all revenue figures. If asked which is best/top/highest, use the data provided to give a specific answer."""
+YEAR ON YEAR: 2020 $7,460,819 | 2021 $8,407,690 | Growth +12.7%
+
+DAY OF WEEK AVERAGES: Sunday $2,142 (peak) | Saturday $1,555 | Friday $1,288 | Thursday $1,156 | Wednesday $1,045 | Tuesday $1,472 | Monday $988 (lowest)
+
+90-DAY FORECASTS (Jan to Mar 2022):
+- All Sites & Brands: $2,742,612 ($30,473/day avg)
+- Crust Co.: $1,688,842 | Flame & Feather: $581,721
+- Cala Grill: $313,839 | Frostbite Creamery: $204,011
+- Crossroads Mall: $731,583 | Junction Plaza: $722,065
+- Piazza Court: $453,255 | Garden Court: $317,608
+
+DATA LIMITATIONS:
+- Harbor Plaza: only 3 weeks of data (opened Dec 2021) — forecasts unreliable
+- Nairobi Central: data only Jan to Mar 2020 — likely closed, no forecast
+- Metro Market: data ends Nov 2021
+- Bon Marche Plaza: opened Aug 2021, only 4 months of data
+
+COVID-19: April 2020 revenue dropped 56% vs January 2020 ($339K vs $781K). Full recovery by 2021 (+12.7% YoY)."""
+
 
 def chat(message, history):
-    if not message or not message.strip(): return ""
-    data_answer = route_intent(message)
-    system = build_system_prompt()
-    messages = [{"role":"system","content":system}]
-    for h in (history or []):
-        if isinstance(h, dict): messages.append({"role":h["role"],"content":h["content"]})
-        elif isinstance(h, (list,tuple)) and len(h)==2:
-            if h[0]: messages.append({"role":"user","content":str(h[0])})
-            if h[1]: messages.append({"role":"assistant","content":str(h[1])})
-    messages.append({"role":"user","content":message+"\n\n[DATA]: "+str(data_answer) if data_answer else message})
+    # Gradio 5 passes history as list of dicts with 'role' and 'content'
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for h in history:
+        if isinstance(h, dict):
+            messages.append({"role": h["role"], "content": h["content"]})
+        elif isinstance(h, (list, tuple)) and len(h) == 2:
+            if h[0]: messages.append({"role": "user",      "content": str(h[0])})
+            if h[1]: messages.append({"role": "assistant", "content": str(h[1])})
+    messages.append({"role": "user", "content": message})
     try:
-        r2 = _http.post("https://api.openai.com/v1/chat/completions", headers={"Authorization":"Bearer "+os.environ.get("OPENAI_API_KEY",""),"Content-Type":"application/json"}, json={"model":"gpt-4o-mini","messages":messages,"temperature":0.2,"max_tokens":600}); resp = r2.json()
-        return resp["choices"][0]["message"]["content"]
-    except Exception as e: return "Error: "+str(e)
-css = """
-body,.gradio-container{background:#050d1a!important;font-family:Arial,sans-serif!important;}
-button[class*="tab-"]{color:#7fb3d3!important;background:transparent!important;border:none!important;border-bottom:3px solid transparent!important;padding:10px 18px!important;font-size:13px!important;}
-button[class*="tab-"][class*="selected"],div[role="tablist"] button[aria-selected="true"]{color:#c9a84c!important;border-bottom:3px solid #c9a84c!important;font-weight:700!important;}
-.gradio-container *{color:#c8d8f0;}
-.gradio-container input,.gradio-container textarea{background:#0a1628!important;color:#c8d8f0!important;border:1px solid #1a3a6e!important;border-radius:6px!important;}
-button.primary,button[variant="primary"]{background:#c9a84c!important;color:#0a1628!important;font-weight:700!important;border:none!important;border-radius:6px!important;}
-button.secondary,button[variant="secondary"]{background:#1a3a6e!important;color:#c8d8f0!important;border:1px solid #c9a84c!important;border-radius:6px!important;}
-.gradio-container .block,.gradio-container .form,.gradio-container .panel{background:#0a1628!important;border:1px solid #1a3a6e!important;border-radius:8px!important;}
-div[class*="chatbot"],.chatbot{background:#040c1a!important;border-radius:12px!important;}
-.gradio-container .prose{color:#c8d8f0!important;}
-.gradio-container .prose strong{color:#c9a84c!important;}
-footer{display:none!important;}
-"""
-with gr.Blocks(title="Savanna QSR Intelligence", css=css) as demo:
-    kpi_header = gr.HTML(value=build_kpi_html())
-    with gr.Tabs():
-        with gr.TabItem("Dashboard"):
-            with gr.Row():
-                period_sel = gr.Radio(choices=['Last 7 Days','Last 30 Days','Last 90 Days','MTD','All Time'],value='All Time',label="Period")
-                with gr.Column(scale=0, min_width=200):
-                    dash_btn = gr.Button("Load Dashboard", variant="primary")
-                    refresh_btn = gr.Button("Refresh Data", variant="secondary")
-                    refresh_msg = gr.Markdown()
-            with gr.Row(): ch1=gr.Plot(show_label=False); ch2=gr.Plot(show_label=False)
-            with gr.Row(): ch3=gr.Plot(show_label=False); ch4=gr.Plot(show_label=False)
-            with gr.Row(): ch5=gr.Plot(show_label=False); ch6=gr.Plot(show_label=False)
-            dash_btn.click(build_dashboard,[period_sel],[kpi_header,ch1,ch2,ch3,ch4,ch5,ch6])
-            period_sel.change(build_dashboard,[period_sel],[kpi_header,ch1,ch2,ch3,ch4,ch5,ch6])
-            refresh_btn.click(refresh_data,[],[kpi_header,refresh_msg])
-        with gr.TabItem("Forecast"):
-            with gr.Row():
-                seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],value='Overall',label="Segment")
-                seg_name = gr.Dropdown(choices=['All'],value='All',label="Name",interactive=True)
-                horizon = gr.Radio(choices=["7","14","30","60"],value="30",label="Horizon (days)")
-                fc_btn = gr.Button("Generate", variant="primary")
-            fc_chart = gr.Plot(show_label=False); fc_summary = gr.Markdown()
-            seg_type.change(update_seg_choices,[seg_type],[seg_name])
-            fc_btn.click(generate_forecast,[seg_type,seg_name,horizon],[fc_chart,fc_summary])
-        with gr.TabItem("Intelligence Chat"):
-            chatbot_box = gr.Chatbot(height=420,show_label=False)
-            with gr.Row():
-                chat_input = gr.Textbox(placeholder="Ask about Savanna QSR...",show_label=False,scale=9,container=False)
-                chat_send = gr.Button("Send",variant="primary",scale=1)
-            def respond(message, history):
-                if not message or not message.strip(): return history or [], ""
-                reply = chat(message, history or [])
-                h = list(history or []); h.append((message, reply))
-                return h, ""
-            chat_send.click(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
-            chat_input.submit(respond,[chat_input,chatbot_box],[chatbot_box,chat_input])
-    gr.HTML('<div style="text-align:center;margin-top:16px;padding:12px;border-top:1px solid #1a3a6e;"><p style="color:#c9a84c;font-size:11px;font-weight:700;letter-spacing:2px;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:11px;">Data - Analytics - Intelligence</p></div>')
-demo.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", messages=messages, temperature=0.2, max_tokens=600
+        )
+        return response.choices[0].message.content
+    except Exception as ex:
+        return f"⚠️ Error: {ex}"
 
+
+# ═══════════════════════════════════════════════════════════════
+# TAB 3 — ANALYTICS DASHBOARD
+# ═══════════════════════════════════════════════════════════════
+def build_dashboard():
+    BG  = '#0a1628'
+    PLT = '#0d1f38'
+    GRD = '#1a3a6e'
+    TXT = '#c8d8f0'
+    GLD = '#c9a84c'
+
+    def base(title, height=340):
+        return dict(
+            title=dict(text=title, font=dict(color=GLD, size=14)),
+            paper_bgcolor=BG, plot_bgcolor=PLT,
+            font=dict(color=TXT, family='Arial', size=11),
+            height=height,
+            xaxis=dict(gridcolor=GRD, linecolor=GRD, tickfont=dict(color=TXT)),
+            yaxis=dict(gridcolor=GRD, linecolor=GRD, tickfont=dict(color=TXT)),
+            legend=dict(bgcolor='rgba(10,22,40,0.85)', bordercolor=GRD,
+                        borderwidth=1, font=dict(color=TXT)),
+        )
+
+    # 1. Brand revenue
+    brand_rev = df.groupby('brand')['daily_revenue_usd'].sum().sort_values(ascending=True).reset_index()
+    fig1 = go.Figure(go.Bar(
+        x=brand_rev['daily_revenue_usd'], y=brand_rev['brand'],
+        orientation='h',
+        marker=dict(color=['#9b59b6','#e74c3c','#2ecc71','#c9a84c']),
+        text=[fmt_val(v) for v in brand_rev['daily_revenue_usd']],
+        textposition='outside', textfont=dict(color=TXT, size=11)
+    ))
+    fig1.update_layout(
+        title=dict(text="Total Revenue by Brand (2020–2021)", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, plot_bgcolor=PLT,
+        font=dict(color=TXT, family='Arial'),
+        height=300,
+        xaxis=dict(title="Revenue (USD)", gridcolor=GRD, linecolor=GRD,
+                   tickfont=dict(color=TXT), tickformat="$,.0f",
+                   range=[0, brand_rev['daily_revenue_usd'].max() * 1.3]),
+        yaxis=dict(tickfont=dict(color=TXT)),
+        margin=dict(l=150, r=90, t=50, b=40)
+    )
+
+    # 2. Site revenue
+    site_rev = df.groupby('site')['daily_revenue_usd'].sum().sort_values(ascending=True).reset_index()
+    fig2 = go.Figure(go.Bar(
+        x=site_rev['daily_revenue_usd'], y=site_rev['site'],
+        orientation='h',
+        marker=dict(color=['#34495e','#34495e','#1abc9c','#9b59b6',
+                           '#e74c3c','#2ecc71','#c9a84c','#c9a84c']),
+        text=[fmt_val(v) for v in site_rev['daily_revenue_usd']],
+        textposition='outside', textfont=dict(color=TXT, size=11)
+    ))
+    fig2.update_layout(
+        title=dict(text="Total Revenue by Site (2020–2021)", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, plot_bgcolor=PLT,
+        font=dict(color=TXT, family='Arial'),
+        height=380,
+        xaxis=dict(title="Revenue (USD)", gridcolor=GRD, linecolor=GRD,
+                   tickfont=dict(color=TXT), tickformat="$,.0f",
+                   range=[0, site_rev['daily_revenue_usd'].max() * 1.32]),
+        yaxis=dict(tickfont=dict(color=TXT)),
+        margin=dict(l=165, r=90, t=50, b=40)
+    )
+
+    # 3. Monthly trend
+    monthly = df.groupby(df['date'].dt.to_period('M'))['daily_revenue_usd'].sum().reset_index()
+    monthly['date'] = monthly['date'].astype(str)
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(
+        x=monthly['date'], y=monthly['daily_revenue_usd'],
+        mode='lines+markers',
+        line=dict(color=GLD, width=2.5),
+        marker=dict(size=5, color=GLD),
+        fill='tozeroy', fillcolor='rgba(201,168,76,0.08)'
+    ))
+    fig3.add_shape(type="rect", x0="2020-03", x1="2020-06",
+                   y0=0, y1=1, yref="paper",
+                   fillcolor="red", opacity=0.08, line_width=0)
+    fig3.add_annotation(x="2020-04", y=0.88, yref="paper",
+                        text="COVID-19", showarrow=False,
+                        font=dict(color="#ff6b6b", size=10),
+                        bgcolor="rgba(10,22,40,0.65)", borderpad=3)
+    fig3.update_layout(
+        title=dict(text="Monthly Revenue Trend (2020–2021)", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, plot_bgcolor=PLT,
+        font=dict(color=TXT, family='Arial'),
+        height=360, showlegend=False,
+        xaxis=dict(title="Month", tickangle=45, gridcolor=GRD,
+                   tickfont=dict(color=TXT)),
+        yaxis=dict(title="Revenue (USD)", tickprefix="$", tickformat=",.0f",
+                   gridcolor=GRD, tickfont=dict(color=TXT)),
+        margin=dict(l=80, r=40, t=50, b=80)
+    )
+
+    # 4. Day of week
+    dow_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+    dow = df.groupby(df['date'].dt.day_name())['daily_revenue_usd'].mean().reindex(dow_order).reset_index()
+    dow.columns = ['day', 'avg_revenue']
+    fig4 = go.Figure(go.Bar(
+        x=dow['day'], y=dow['avg_revenue'],
+        marker=dict(color=['#c9a84c' if d=='Sunday' else '#1e3a6e' for d in dow['day']]),
+        text=[f"${v:,.0f}" for v in dow['avg_revenue']],
+        textposition='outside', textfont=dict(color=TXT, size=11)
+    ))
+    fig4.update_layout(
+        title=dict(text="Avg Daily Revenue by Day of Week", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, plot_bgcolor=PLT,
+        font=dict(color=TXT, family='Arial'),
+        height=320,
+        xaxis=dict(title="Day", tickfont=dict(color=TXT)),
+        yaxis=dict(title="Avg Revenue (USD)", tickprefix="$", tickformat=",.0f",
+                   gridcolor=GRD, tickfont=dict(color=TXT),
+                   range=[0, dow['avg_revenue'].max() * 1.28]),
+        margin=dict(l=80, r=40, t=50, b=40)
+    )
+
+    # 5. YoY by brand
+    yoy = df.groupby([df['date'].dt.year, 'brand'])['daily_revenue_usd'].sum().reset_index()
+    yoy.columns = ['year', 'brand', 'revenue']
+    bc = {'Crust Co.':'#c9a84c','Flame & Feather':'#2ecc71',
+          'Cala Grill':'#e74c3c','Frostbite Creamery':'#9b59b6'}
+    fig5 = go.Figure()
+    for brand in BRANDS:
+        b = yoy[yoy['brand'] == brand]
+        fig5.add_trace(go.Bar(
+            x=b['year'].astype(str), y=b['revenue'], name=brand,
+            marker_color=bc.get(brand, GLD),
+            text=[fmt_val(v) for v in b['revenue']],
+            textposition='outside', textfont=dict(color=TXT, size=10)
+        ))
+    fig5.update_layout(
+        title=dict(text="Year-on-Year Revenue by Brand", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, plot_bgcolor=PLT,
+        font=dict(color=TXT, family='Arial'),
+        height=340, barmode='group',
+        xaxis=dict(title="Year", tickfont=dict(color=TXT)),
+        yaxis=dict(title="Revenue (USD)", tickprefix="$", tickformat=",.0f",
+                   gridcolor=GRD, tickfont=dict(color=TXT)),
+        legend=dict(bgcolor='rgba(10,22,40,0.85)', bordercolor=GRD,
+                    borderwidth=1, font=dict(color=TXT)),
+        margin=dict(l=80, r=40, t=50, b=40)
+    )
+
+    # 6. Revenue share pie
+    site_rev2 = df.groupby('site')['daily_revenue_usd'].sum().reset_index()
+    fig6 = go.Figure(go.Pie(
+        labels=site_rev2['site'], values=site_rev2['daily_revenue_usd'],
+        hole=0.45,
+        marker=dict(colors=['#c9a84c','#1e2d5e','#2ecc71','#e74c3c',
+                            '#9b59b6','#1abc9c','#f39c12','#34495e'],
+                    line=dict(color='#0a1628', width=2)),
+        textfont=dict(color='#ffffff', size=11)
+    ))
+    fig6.update_layout(
+        title=dict(text="Revenue Share by Site", font=dict(color=GLD, size=14)),
+        paper_bgcolor=BG, font=dict(color=TXT),
+        height=340, margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(bgcolor='rgba(10,22,40,0.85)', bordercolor=GRD,
+                    borderwidth=1, font=dict(color=TXT))
+    )
+
+    return fig1, fig2, fig3, fig4, fig5, fig6
+
+
+# ═══════════════════════════════════════════════════════════════
+# CSS — Comprehensive dark theme for Gradio 5
+# ═══════════════════════════════════════════════════════════════
+
+css = """
+/* ── Base ──────────────────────────────────────────────── */
+body, .gradio-container, .main {
+    background-color: #050d1a !important;
+    font-family: Arial, sans-serif !important;
+}
+
+/* ── ALL text defaults to light ─────────────────────────── */
+.gradio-container, .gradio-container * {
+    color: #c8d8f0;
+}
+
+/* ── Tab bar — Gradio 5 selectors ───────────────────────── */
+.tabs > .tab-nav,
+[class*="tabs"] > [class*="tab-nav"],
+div.tab-nav {
+    background-color: #0a1628 !important;
+    border-bottom: 2px solid #1a3a6e !important;
+}
+
+/* Every tab button */
+.tab-nav button,
+[class*="tab-nav"] button,
+div[role="tablist"] button {
+    color: #7fb3d3 !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 3px solid transparent !important;
+    padding: 10px 18px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+}
+
+.tab-nav button:hover,
+[class*="tab-nav"] button:hover,
+div[role="tablist"] button:hover {
+    color: #ffffff !important;
+    background: rgba(201,168,76,0.07) !important;
+}
+
+/* Selected tab */
+.tab-nav button.selected,
+[class*="tab-nav"] button.selected,
+div[role="tablist"] button[aria-selected="true"],
+button[data-testid*="tab"][aria-selected="true"] {
+    color: #c9a84c !important;
+    border-bottom: 3px solid #c9a84c !important;
+    font-weight: 700 !important;
+    background: transparent !important;
+}
+
+/* ── Labels ──────────────────────────────────────────────── */
+label, .label-wrap, .label-wrap span,
+fieldset legend, .form > label {
+    color: #a8c8f0 !important;
+    font-size: 13px !important;
+}
+
+/* ── Radio & checkbox text ───────────────────────────────── */
+.gradio-container input[type="radio"] + span,
+.gradio-container input[type="radio"] ~ span,
+.gradio-container .wrap label span,
+.gradio-container [data-testid="radio-group"] span,
+.gradio-container .svelte-1cl284s span {
+    color: #c8d8f0 !important;
+}
+input[type="radio"] { accent-color: #c9a84c !important; }
+input[type="checkbox"] { accent-color: #c9a84c !important; }
+
+/* ── Inputs & dropdowns ──────────────────────────────────── */
+input, textarea, select,
+.gradio-container input,
+.gradio-container textarea {
+    background-color: #0a1628 !important;
+    color: #c8d8f0 !important;
+    border: 1px solid #1a3a6e !important;
+    border-radius: 6px !important;
+}
+
+/* ── Dropdown list ───────────────────────────────────────── */
+ul[role="listbox"] {
+    background-color: #0d1b2a !important;
+    border: 1px solid #c9a84c !important;
+    border-radius: 6px !important;
+}
+ul[role="listbox"] li {
+    color: #ffffff !important;
+    background-color: #0d1b2a !important;
+    padding: 8px 12px !important;
+}
+ul[role="listbox"] li:hover,
+ul[role="listbox"] li[aria-selected="true"] {
+    background-color: #c9a84c !important;
+    color: #0d1b2a !important;
+    font-weight: 600 !important;
+}
+
+/* ── Panel / block backgrounds ───────────────────────────── */
+.gradio-container .block,
+.gradio-container .form,
+.gradio-container .panel {
+    background-color: #0a1628 !important;
+    border-color: #1a3a6e !important;
+    border-radius: 8px !important;
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+button.primary, .gradio-container button.primary,
+button[variant="primary"] {
+    background-color: #c9a84c !important;
+    color: #0a1628 !important;
+    font-weight: 700 !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-size: 14px !important;
+    padding: 10px 24px !important;
+}
+button.primary:hover { background-color: #e0be6a !important; }
+
+button.secondary, .gradio-container button.secondary {
+    background-color: #1e2d5e !important;
+    color: #c8d8f0 !important;
+    border: 1px solid #c9a84c !important;
+    border-radius: 6px !important;
+}
+
+/* ── Chat bubbles ────────────────────────────────────────── */
+.message.user > div,
+div[data-testid="user"] > div,
+div[class*="message"][class*="user"] > div:last-child {
+    background: linear-gradient(135deg, #1e2d5e, #162d5a) !important;
+    color: #e8f0ff !important;
+    border-radius: 18px 18px 4px 18px !important;
+    border: 1px solid #2a4a8a !important;
+    padding: 12px 16px !important;
+}
+.message.bot > div,
+div[data-testid="bot"] > div,
+div[class*="message"][class*="bot"] > div:last-child {
+    background: linear-gradient(135deg, #0a1e3d, #112952) !important;
+    color: #ffffff !important;
+    border-radius: 18px 18px 18px 4px !important;
+    border: 1px solid rgba(42, 106, 160, 0.33) !important;
+    padding: 12px 16px !important;
+}
+.message.bot > div *, div[data-testid="bot"] > div * { color: #ffffff !important; }
+.message.bot > div strong, div[data-testid="bot"] strong { color: #c9a84c !important; }
+
+div[class*="chatbot"], .chatbot {
+    background-color: #040c1a !important;
+    border-radius: 12px !important;
+}
+
+/* ── Markdown ────────────────────────────────────────────── */
+.prose, .prose p, .prose li { color: #c8d8f0 !important; }
+.prose strong { color: #c9a84c !important; }
+.prose table { border-color: #1a3a6e !important; width: auto !important; }
+.prose th { background-color: #0a1628 !important; color: #c9a84c !important; padding: 6px 12px !important; }
+.prose td { border-color: #1a3a6e !important; color: #c8d8f0 !important; padding: 5px 12px !important; }
+.prose tr:nth-child(even) td { background-color: rgba(10,22,40,0.5) !important; }
+
+/* ── Scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #050d1a; }
+::-webkit-scrollbar-thumb { background: #c9a84c; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #e0be6a; }
+
+footer { display: none !important; }
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# GRADIO APP
+# ═══════════════════════════════════════════════════════════════
+
+with gr.Blocks(title="Continental QSR Intelligence | Netrisyl Insights", css=css) as demo:
+
+    # ── Header ─────────────────────────────────────────────────
+    gr.HTML(f"""
+    <div style="background:linear-gradient(135deg,#0d1b2a 0%,#1a3a5c 100%);
+                padding:20px 28px 18px;border-radius:12px;margin-bottom:2px;
+                border-left:4px solid #c9a84c;
+                box-shadow:0 4px 24px rgba(0,0,0,0.45);">
+
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    flex-wrap:wrap;gap:14px;">
+            <div style="display:flex;align-items:center;gap:16px;">
+                {LOGO_HTML}
+                <div>
+                    <h1 style="color:#ffffff;margin:0;font-size:22px;font-weight:700;
+                               letter-spacing:0.3px;line-height:1.2;">
+                        🍔 Continental QSR Intelligence
+                    </h1>
+                    <p style="color:#aed6f1;margin:5px 0 0;font-size:13px;">
+                        Revenue Analytics &amp; Forecasting &nbsp;·&nbsp;
+                        Nairobi, Kenya &nbsp;·&nbsp; 2020–2021
+                    </p>
+                </div>
+            </div>
+            <div style="text-align:right;">
+                <p style="color:#c9a84c;margin:0;font-size:10px;font-weight:700;
+                          letter-spacing:2.5px;">NETRISYL INSIGHTS</p>
+                <p style="color:#7fb3d3;margin:3px 0 0;font-size:11px;">
+                    Data &nbsp;·&nbsp; Analytics &nbsp;·&nbsp; Intelligence
+                </p>
+            </div>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;">
+            <div style="background:rgba(10,22,40,0.7);padding:10px 20px;
+                        border-radius:8px;border:1px solid #1a3a6e;
+                        min-width:85px;text-align:center;">
+                <div style="color:#c9a84c;font-size:19px;font-weight:700;">$15.9M</div>
+                <div style="color:#7fb3d3;font-size:11px;margin-top:2px;">Total Revenue</div>
+            </div>
+            <div style="background:rgba(10,22,40,0.7);padding:10px 20px;
+                        border-radius:8px;border:1px solid #1a3a6e;
+                        min-width:85px;text-align:center;">
+                <div style="color:#2ecc71;font-size:19px;font-weight:700;">+12.7%</div>
+                <div style="color:#7fb3d3;font-size:11px;margin-top:2px;">YoY Growth</div>
+            </div>
+            <div style="background:rgba(10,22,40,0.7);padding:10px 20px;
+                        border-radius:8px;border:1px solid #1a3a6e;
+                        min-width:85px;text-align:center;">
+                <div style="color:#c9a84c;font-size:19px;font-weight:700;">8 Sites</div>
+                <div style="color:#7fb3d3;font-size:11px;margin-top:2px;">4 Brands</div>
+            </div>
+            <div style="background:rgba(10,22,40,0.7);padding:10px 20px;
+                        border-radius:8px;border:1px solid #1a3a6e;
+                        min-width:85px;text-align:center;">
+                <div style="color:#c9a84c;font-size:19px;font-weight:700;">$2.74M</div>
+                <div style="color:#7fb3d3;font-size:11px;margin-top:2px;">90-Day Forecast</div>
+            </div>
+            <div style="background:rgba(10,22,40,0.7);padding:10px 20px;
+                        border-radius:8px;border:1px solid #1a3a6e;
+                        min-width:85px;text-align:center;">
+                <div style="color:#c9a84c;font-size:19px;font-weight:700;">$23.9K</div>
+                <div style="color:#7fb3d3;font-size:11px;margin-top:2px;">Avg Daily Rev</div>
+            </div>
+        </div>
+    </div>
+    """)
+
+    with gr.Tabs():
+
+        # ── Tab 1: Revenue Forecast ───────────────────────────
+        with gr.TabItem("📈 Revenue Forecast"):
+            gr.HTML("""<p style="color:#7fb3d3;font-size:12px;margin:10px 0 14px;">
+                Select segment type, choose a specific segment, pick forecast horizon, then click Generate.</p>""")
+
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=2, min_width=160):
+                    seg_type = gr.Radio(
+                        choices=["Overall", "By Brand", "By Site"],
+                        value="Overall",
+                        label="Segment Type"
+                    )
+                with gr.Column(scale=2, min_width=180):
+                    seg_name = gr.Dropdown(
+                        choices=["All Sites & Brands"],
+                        value="All Sites & Brands",
+                        label="Select Segment",
+                        interactive=True
+                    )
+                with gr.Column(scale=2, min_width=160):
+                    horizon = gr.Radio(
+                        choices=[30, 60, 90],
+                        value=90,
+                        label="Forecast Horizon (days)"
+                    )
+                with gr.Column(scale=1, min_width=140):
+                    forecast_btn = gr.Button("⚡ Generate", variant="primary")
+
+            forecast_chart   = gr.Plot(show_label=False)
+            forecast_summary = gr.Markdown()
+
+            seg_type.change(update_segment_choices, [seg_type], [seg_name])
+            forecast_btn.click(
+                generate_forecast,
+                [seg_type, seg_name, horizon],
+                [forecast_chart, forecast_summary]
+            )
+
+        # ── Tab 2: Intelligence Chat ──────────────────────────
+        with gr.TabItem("💬 Intelligence Chat"):
+            gr.HTML("""
+            <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:8px;
+                        padding:14px 18px;margin:10px 0 16px;">
+                <p style="color:#c9a84c;font-weight:700;margin:0 0 6px;font-size:13px;">
+                    💡 Ask anything about the Continental QSR Group revenue data
+                </p>
+                <p style="color:#7fb3d3;font-size:12px;margin:0;line-height:1.8;">
+                    <strong style="color:#c8d8f0;">"Which brand is the top performer?"</strong>
+                    &nbsp;·&nbsp;
+                    <strong style="color:#c8d8f0;">"What was the COVID-19 impact?"</strong>
+                    &nbsp;·&nbsp;
+                    <strong style="color:#c8d8f0;">"Compare Junction Plaza vs Crossroads Mall"</strong>
+                    &nbsp;·&nbsp;
+                    <strong style="color:#c8d8f0;">"Which site should we invest in?"</strong>
+                </p>
+            </div>""")
+            chatbot = gr.ChatInterface(
+                fn=chat,
+                title="",
+                type="messages",
+                examples=[
+                    "Which brand generates the most revenue?",
+                    "What was the COVID-19 impact on revenue?",
+                    "Which site should we prioritize for expansion?",
+                    "What is the 90-day revenue forecast for Crust Co.?",
+                    "Compare Junction Plaza and Crossroads Mall",
+                    "What day of the week has the highest revenue?",
+                    "Which sites have data limitations?",
+                    "What is the year-on-year growth trend?",
+                ]
+            )
+
+        # ── Tab 3: Analytics Dashboard ────────────────────────
+        with gr.TabItem("📊 Analytics Dashboard"):
+            gr.HTML("""<p style="color:#7fb3d3;font-size:12px;margin:10px 0 14px;">
+                Click Load Dashboard to render all six analytics charts.</p>""")
+            dash_btn = gr.Button("📊 Load Dashboard", variant="primary")
+            with gr.Row():
+                chart_brand = gr.Plot(show_label=False)
+                chart_site  = gr.Plot(show_label=False)
+            with gr.Row():
+                chart_monthly = gr.Plot(show_label=False)
+                chart_dow     = gr.Plot(show_label=False)
+            with gr.Row():
+                chart_yoy = gr.Plot(show_label=False)
+                chart_pie = gr.Plot(show_label=False)
+            dash_btn.click(
+                build_dashboard, [],
+                [chart_brand, chart_site, chart_monthly, chart_dow, chart_yoy, chart_pie]
+            )
+
+    # ── Footer ─────────────────────────────────────────────────
+    gr.HTML("""
+    <div style="text-align:center;margin-top:20px;padding:14px 0;
+                border-top:1px solid #1a3a6e;">
+        <p style="color:#c9a84c;font-size:11px;font-weight:700;
+                  margin:0;letter-spacing:2px;">NETRISYL INSIGHTS</p>
+        <p style="color:#4a6a9e;font-size:11px;margin:5px 0 0;">
+            Data · Analytics · Intelligence ·
+            <a href="https://netrisyl.com" target="_blank"
+               style="color:#7fb3d3;text-decoration:none;">netrisyl.com</a>
+        </p>
+        <p style="color:#2a4a6e;font-size:10px;margin:4px 0 0;">
+            ⚠️ Data anonymized. All site and brand names are fictional.
+            Built for demonstration purposes.
+        </p>
+    </div>""")
+
+demo.launch(server_name="0.0.0.0", server_port=7860)
