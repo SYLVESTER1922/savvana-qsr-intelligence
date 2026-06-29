@@ -190,41 +190,51 @@ def build_dashboard(date_from, date_to):
         e = go.Figure().update_layout(**dark_layout("No data — click Refresh"))
         return kpi, e, e, e, e, e, e
 
-    # 1. Revenue by Complex — gold actual bar + navy budget overlay
+    # 1. Revenue by Complex — vertical grouped bars
     cx = dff.groupby('complex').agg(
         actual=('actual_revenue_usd','sum'), budget=('budget_usd','sum')
-    ).reset_index().sort_values('actual', ascending=True)
+    ).reset_index().sort_values('actual', ascending=False)
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
-        name='Budget', x=cx['budget'], y=cx['complex'], orientation='h',
-        marker=dict(color='#2a4a8a', line=dict(color=C_GRID, width=1)), opacity=0.55
+        name='Budget', x=cx['complex'], y=cx['budget'],
+        marker=dict(color='#2a4a8a', line=dict(color='white', width=1)), opacity=0.7,
+        text=[fmt(v) for v in cx['budget']], textposition='outside',
+        textfont=dict(color='#374151', size=10, family='Inter, Arial')
     ))
     fig1.add_trace(go.Bar(
-        name='Actual', x=cx['actual'], y=cx['complex'], orientation='h',
+        name='Actual', x=cx['complex'], y=cx['actual'],
         marker=dict(color=C_GOLD, line=dict(color=C_NAVY, width=1)),
-        text=[fmt(v) for v in cx['actual']], textposition='inside',
-        insidetextanchor='middle', textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial', weight='bold')
+        text=[fmt(v) for v in cx['actual']], textposition='outside',
+        textfont=dict(color='#374151', size=11, family='Inter, Arial')
     ))
-    fig1.update_layout(**dark_layout("Revenue by Complex — Actual vs Budget", height=300),
-                       barmode='group',
-                       xaxis_tickprefix='$', xaxis_tickformat=',.0f')
+    y_max1 = cx['actual'].max() * 1.25
+    fig1.update_layout(**dark_layout("Revenue by Complex — Actual vs Budget", height=320,
+                                     margin=dict(l=60,r=20,t=60,b=60)),
+                       barmode='group', bargap=0.25, bargroupgap=0.05,
+                       yaxis_tickprefix='$', yaxis_tickformat=',.0f',
+                       yaxis_range=[0, y_max1])
 
-    # 2. Revenue by Brand
-    br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd', ascending=True)
-    bud_br = dff.groupby('brand')['budget_usd'].sum() if 'budget_usd' in dff.columns else None
-    texts = []
+    # 2. Revenue by Brand — vertical bars, all 4 brands guaranteed visible
+    br = dff.groupby('brand')['actual_revenue_usd'].sum().reset_index().sort_values('actual_revenue_usd', ascending=False)
+    br = br.reset_index(drop=True)
+    has_bud = 'budget_usd' in dff.columns and dff['budget_usd'].sum() > 0
+    bud_br = dff.groupby('brand')['budget_usd'].sum() if has_bud else None
+    labels = []
     for _, row in br.iterrows():
-        bv = bud_br[row['brand']] if bud_br is not None and bud_br.sum() > 0 else 0
-        ach = f"  {row['actual_revenue_usd']/bv*100:.0f}%" if bv > 0 else ""
-        texts.append(f"{fmt(row['actual_revenue_usd'])}{ach}")
+        bv = float(bud_br[row['brand']]) if bud_br is not None else 0
+        ach = f" ({row['actual_revenue_usd']/bv*100:.0f}%)" if bv > 0 else ""
+        labels.append(f"{fmt(row['actual_revenue_usd'])}{ach}")
+    y_max2 = float(br['actual_revenue_usd'].max()) * 1.25
     fig2 = go.Figure(go.Bar(
-        x=br['actual_revenue_usd'], y=br['brand'], orientation='h',
-        marker=dict(color=BAR_COLS[:len(br)], line=dict(color=C_GRID, width=1)),
-        text=texts, textposition='inside', insidetextanchor='middle',
-        textfont=dict(color='white', size=11, family='Inter, Arial', weight='bold')
+        x=br['brand'], y=br['actual_revenue_usd'],
+        marker=dict(color=BAR_COLS[:len(br)], line=dict(color='white', width=1)),
+        text=labels, textposition='outside',
+        textfont=dict(color='#374151', size=11, family='Inter, Arial')
     ))
-    fig2.update_layout(**dark_layout("Revenue by Brand", height=280),
-                       xaxis_tickprefix='$', xaxis_tickformat=',.0f')
+    fig2.update_layout(**dark_layout("Revenue by Brand", height=320,
+                                     margin=dict(l=60,r=20,t=60,b=60)),
+                       yaxis_tickprefix='$', yaxis_tickformat=',.0f',
+                       yaxis_range=[0, y_max2], bargap=0.3)
 
     # 3. Daily Revenue Trend — bar per day so it is clearly NOT cumulative
     daily = dff.groupby('date')['actual_revenue_usd'].sum().reset_index()
@@ -258,15 +268,17 @@ def build_dashboard(date_from, date_to):
                 x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=13))
             fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280))
         else:
+            y_max4 = float(cx_agg['avg'].max()) * 1.25
             fig4 = go.Figure(go.Bar(
-                x=cx_agg['avg'], y=cx_agg['complex'], orientation='h',
+                x=cx_agg['complex'], y=cx_agg['avg'],
                 marker=dict(color=C_TEAL, line=dict(color=C_NAVY, width=1)),
-                text=[f"${v:.2f}" for v in cx_agg['avg']], textposition='inside',
-                insidetextanchor='middle',
-                textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial')
+                text=[f"${v:.2f}" for v in cx_agg['avg']], textposition='outside',
+                textfont=dict(color='#374151', size=11, family='Inter, Arial')
             ))
-            fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280),
-                               xaxis_tickprefix='$', xaxis_tickformat=',.2f')
+            fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=300,
+                                             margin=dict(l=60,r=20,t=60,b=60)),
+                               yaxis_tickprefix='$', yaxis_tickformat=',.2f',
+                               yaxis_range=[0, y_max4], bargap=0.35)
     else:
         fig4 = go.Figure()
         fig4.add_annotation(text="No customer count data in dataset", xref="paper", yref="paper",
