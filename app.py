@@ -350,7 +350,9 @@ def build_dashboard(date_from, date_to):
 
     return kpi, fig1, fig2, fig3, fig4, fig5, fig6
 
-# ── Forecast — Prophet with DRC holidays + weekly seasonality ────────────────
+# ── Forecast ──────────────────────────────────────────────────────────────────
+GROWTH = 0.05
+DOW    = {0:0.82,1:0.88,2:0.91,3:0.95,4:1.08,5:1.28,6:1.18}
 
 def update_seg_choices(seg_type):
     if seg_type == 'Overall':
@@ -364,161 +366,95 @@ def update_seg_choices(seg_type):
         return gr.update(choices=opts, value=opts[0])
 
 def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
-    """Prophet forecast with DRC holidays + weekly seasonality."""
-    empty_season = go.Figure().update_layout(**dark_layout("Generate a forecast to see seasonality", height=280))
     try:
-        from prophet import Prophet
-        import warnings, logging
-        warnings.filterwarnings('ignore')
-        logging.getLogger('prophet').setLevel(logging.ERROR)
-        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
-
         df = filter_df(date_from, date_to)
         if df.empty:
-            return go.Figure().update_layout(**dark_layout("No data for selected range")), "No data.", empty_season
-
+            return go.Figure().update_layout(**dark_layout("No data for selected range")), "No data."
         h = int(horizon)
+        # Force actual_revenue_usd to numeric before any groupby
         df = df.copy()
         df['actual_revenue_usd'] = pd.to_numeric(df['actual_revenue_usd'], errors='coerce').fillna(0)
-
-        # Build segment daily series
         if seg_type == 'Overall':
-            seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index(); label = 'All Complexes & Brands'
+            seg = df.groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = 'All Complexes & Brands'
         elif seg_type == 'By Complex':
-            seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index(); label = seg_name
+            seg = df[df['complex']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = seg_name
         elif seg_type == 'By Brand':
-            seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index(); label = seg_name
+            seg = df[df['brand']==seg_name].groupby('date')['actual_revenue_usd'].sum().reset_index()
+            label = seg_name
         else:
             parts = seg_name.split(' | ')
             seg = df[(df['complex']==parts[0])&(df['brand']==parts[1])].groupby('date')['actual_revenue_usd'].sum().reset_index() if len(parts)==2 else df.groupby('date')['actual_revenue_usd'].sum().reset_index()
             label = seg_name
-
-        seg.columns = ['ds','y']
-        seg['y'] = pd.to_numeric(seg['y'], errors='coerce').fillna(0)
-        seg = seg[seg['y'] > 0].sort_values('ds').reset_index(drop=True)
-
-        if len(seg) < 14:
-            return go.Figure().update_layout(**dark_layout("Need at least 14 days of data")), "Insufficient data.", empty_season
-
-        # ── Fit Prophet with DRC holidays ─────────────────────────────────────
-        m = Prophet(
-            yearly_seasonality=True if len(seg) >= 365 else False,
-            weekly_seasonality=True,
-            daily_seasonality=False,
-            interval_width=0.80,
-            seasonality_mode='multiplicative'
-        )
-        m.add_country_holidays(country_name='CD')  # DRC (Congo) holidays
-        m.fit(seg)
-
-        # ── Forecast ──────────────────────────────────────────────────────────
-        future   = m.make_future_dataframe(periods=h)
-        forecast = m.predict(future)
-        last     = seg['ds'].max()
-        hist_60  = seg[seg['ds'] >= last - timedelta(days=60)].reset_index(drop=True)
-        fc_only  = forecast[forecast['ds'] > last].reset_index(drop=True)
-
-        # Clip lower bound to 0
-        fc_only['yhat']       = fc_only['yhat'].clip(lower=0)
-        fc_only['yhat_lower'] = fc_only['yhat_lower'].clip(lower=0)
-        fc_only['yhat_upper'] = fc_only['yhat_upper'].clip(lower=0)
-
-        # ── Main forecast chart ───────────────────────────────────────────────
+        seg.columns = ['date','revenue']
+        seg['revenue'] = pd.to_numeric(seg['revenue'], errors='coerce').fillna(0)
+        seg = seg.sort_values('date').reset_index(drop=True)
+        if len(seg) < 7:
+            return go.Figure().update_layout(**dark_layout("Need at least 7 days of data for this segment")), "Insufficient data."
+        last = seg['date'].max()
+        base = float(seg['revenue'].tail(min(h, len(seg))).mean())
+        # Show last 30 days of history — makes weekly cycles clearly visible
+        seg_display = seg[seg['date'] >= last - timedelta(days=30)].reset_index(drop=True)
+        if np.isnan(base) or base <= 0: base = float(seg['revenue'].mean())
+        fc_dates = [last + timedelta(days=i+1) for i in range(h)]
+        fc_vals  = [round(base * DOW[d.weekday()] * (1+GROWTH), 2) for d in fc_dates]
+        upper = [v*1.15 for v in fc_vals]
+        lower = [v*0.85 for v in fc_vals]
         fig = go.Figure()
-        # Confidence band
+        # 1. Confidence band drawn FIRST (background)
         fig.add_trace(go.Scatter(
-            x=pd.concat([fc_only['ds'], fc_only['ds'].iloc[::-1]]),
-            y=pd.concat([fc_only['yhat_upper'], fc_only['yhat_lower'].iloc[::-1]]),
-            fill='toself', fillcolor='rgba(201,165,92,0.15)',
-            line=dict(color='rgba(0,0,0,0)'), name='80% Confidence', hoverinfo='skip'))
-        # Historical
-        fig.add_trace(go.Scatter(
-            x=hist_60['ds'], y=hist_60['y'],
-            name='Historical (last 60d)', mode='lines+markers',
-            line=dict(color=C_NAVY, width=2.5),
-            marker=dict(size=4, color=C_NAVY),
-            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Actual</extra>'))
-        # Prophet forecast
-        fig.add_trace(go.Scatter(
-            x=fc_only['ds'], y=fc_only['yhat'],
-            name=f'Prophet {h}-Day Forecast', mode='lines+markers',
-            line=dict(color=C_GOLD, width=3, dash='dash'),
-            marker=dict(size=6, color=C_GOLD, line=dict(color=C_NAVY, width=1.2)),
+            x=fc_dates+fc_dates[::-1], y=upper+lower[::-1],
+            fill='toself', fillcolor='rgba(201,168,76,0.12)',
+            line=dict(color='rgba(0,0,0,0)'), name='Confidence Band', hoverinfo='skip'))
+        # 2. Historical line ON TOP of confidence band
+        fig.add_trace(go.Scatter(x=seg_display['date'], y=seg_display['revenue'],
+            name='Historical (last 90d)',
+            mode='lines+markers',
+            line=dict(color='#C0392B', width=3),
+            marker=dict(size=5, color='#C0392B'),
+            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Historical</extra>'))
+        # 3. Forecast line on top
+        fig.add_trace(go.Scatter(x=fc_dates, y=fc_vals, name=f'{h}-Day Forecast',
+            line=dict(color=C_GOLD, width=3, dash='dash'), mode='lines+markers',
+            marker=dict(size=7, color=C_GOLD, symbol='circle',
+                        line=dict(color=C_NAVY, width=1.5)),
             hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Forecast</extra>'))
-        # Mark DRC holidays in forecast window
-        import holidays as _hol
-        drc = _hol.country_holidays('CD', years=[last.year, last.year+1])
-        for hdate, hname in drc.items():
-            hts = pd.Timestamp(hdate)
-            if last < hts <= last + timedelta(days=h):
-                fig.add_vline(x=str(hts)[:10], line_dash='dot',
-                              line_color=C_RED, opacity=0.5,
-                              annotation_text=hname[:20],
-                              annotation_position='top left',
-                              annotation_font=dict(size=9, color=C_RED))
-        fig.add_vline(x=str(last)[:10], line_dash='dot', line_color='#374151', opacity=0.4)
-        y_vals = list(hist_60['y']) + list(fc_only['yhat_upper'])
-        y_max  = max(y_vals) * 1.18 if y_vals else 1
-        y_min  = max(0, min(list(hist_60['y']) + list(fc_only['yhat_lower'])) * 0.85)
-        layout = dark_layout(f"Prophet Forecast — {label} ({h} days)", height=460, margin=dict(l=80,r=40,t=70,b=50))
-        layout.update(hovermode='x unified', yaxis_tickprefix='$', yaxis_tickformat=',.0f',
-                      yaxis_range=[y_min, y_max])
+        fig.add_vline(x=str(last)[:10], line_dash='dot', line_color=C_GOLD, opacity=0.5)
+        hist_vals = [v for v in seg_display['revenue'].tolist() if v and not np.isnan(float(v))]
+        all_vals = hist_vals + fc_vals + upper
+        y_max = max(all_vals) * 1.15 if all_vals else 1
+        # Start y-axis near data minimum so weekly cycles are clearly visible
+        data_min = min(hist_vals + lower) if hist_vals else 0
+        y_min = max(0, data_min * 0.85)
+        layout = dark_layout(f"{label} — {h}-Day Forecast", height=480,
+                             margin=dict(l=80,r=40,t=60,b=50))
+        layout['hovermode'] = 'x unified'
+        layout['yaxis_tickprefix'] = '$'
+        layout['yaxis_tickformat'] = ',.0f'
+        layout['yaxis_range'] = [y_min, y_max]
         fig.update_layout(**layout)
-
-        # ── Day-of-week seasonality chart ─────────────────────────────────────
-        dow_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-        dow_short = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-        seg['dow'] = pd.to_datetime(seg['ds']).dt.day_name()
-        dow_avg = seg.groupby('dow')['y'].mean().reindex([d for d in dow_order if d in seg['dow'].unique()])
-        dow_mean = dow_avg.mean()
-        bar_colors = [C_GOLD if v >= dow_mean else C_NAVY for v in dow_avg.values]
-        fig_season = go.Figure(go.Bar(
-            x=[dow_short[dow_order.index(d)] for d in dow_avg.index],
-            y=dow_avg.values.tolist(),
-            marker=dict(color=bar_colors, line=dict(color='white', width=1)),
-            text=[fmt(v) for v in dow_avg.values],
-            textposition='outside',
-            textfont=dict(size=10, color='#374151', family='Inter, Arial')
-        ))
-        fig_season.update_layout(
-            **dark_layout("Avg Revenue by Day of Week (DRC calendar)", height=280, margin=dict(l=50,r=20,t=50,b=40)),
-            yaxis_tickprefix='$', yaxis_tickformat=',.0f',
-            yaxis_range=[0, dow_avg.max() * 1.3], showlegend=False)
-
-        # ── Summary ───────────────────────────────────────────────────────────
-        total     = float(fc_only['yhat'].sum())
-        avg_daily = total / h
-        peak_row  = fc_only.loc[fc_only['yhat'].idxmax()]
-        low_row   = fc_only.loc[fc_only['yhat'].idxmin()]
-        trend_now = float(forecast.loc[forecast['ds']==last, 'trend'].values[0]) if last in forecast['ds'].values else 0
-        trend_end = float(fc_only['trend'].iloc[-1])
-        trend_pct = (trend_end - trend_now) / trend_now * 100 if trend_now > 0 else 0
-        trend_arrow = "📈" if trend_pct > 0.5 else ("📉" if trend_pct < -0.5 else "➡️")
-        best_dow   = dow_avg.idxmax()
-        worst_dow  = dow_avg.idxmin()
-        lines = [
-            f"**Prophet {h}-Day Forecast — {label}**",
-            f"",
-            f"| Metric | Value |",
-            f"|---|---|",
-            f"| Predicted Total | **{fmt(total)}** |",
-            f"| Daily Average | **{fmt(avg_daily)}** |",
-            f"| Peak Day | **{fmt(peak_row['yhat'])}** on {peak_row['ds'].strftime('%a %b %d, %Y')} |",
-            f"| Lowest Day | **{fmt(low_row['yhat'])}** on {low_row['ds'].strftime('%a %b %d, %Y')} |",
-            f"| Trend | {trend_arrow} **{trend_pct:+.1f}%** over forecast period |",
-            f"| Best Day | **{best_dow}** avg {fmt(dow_avg[best_dow])} |",
-            f"| Weakest Day | **{worst_dow}** avg {fmt(dow_avg[worst_dow])} |",
-            f"",
-            f"> Prophet model with DRC public holidays and 80% confidence interval",
-        ]
-        summary = "\n".join(lines)
-        return fig, summary, fig_season
-
-    except ImportError:
-        return (go.Figure().update_layout(**dark_layout("Prophet not installed — add 'prophet' to requirements.txt", height=460)),
-                "Prophet not installed.", empty_season)
+        total = sum(fc_vals); avg = total/h
+        peak = max(fc_vals); peak_d = fc_dates[fc_vals.index(peak)].strftime('%b %d, %Y')
+        low  = min(fc_vals); low_d  = fc_dates[fc_vals.index(low)].strftime('%b %d, %Y')
+        # Show first 14 days breakdown
+        day_rows = "\n".join([f"| {fc_dates[i].strftime('%a %b %d')} | **{fmt(fc_vals[i])}** |"
+                               for i in range(min(14, h))])
+        debug_info = ""  # debug removed — data confirmed correct
+        summary = (f"**{h}-Day Forecast — {label}**\n\n"
+                   f"| Metric | Value |\n|---|---|\n"
+                   f"| Predicted Total | **{fmt(total)}** |\n"
+                   f"| Daily Average | **{fmt(avg)}** |\n"
+                   f"| Peak Day | **{fmt(peak)}** on {peak_d} (Sat) |\n"
+                   f"| Lowest Day | **{fmt(low)}** on {low_d} (Mon) |\n"
+                   f"| Period | {fc_dates[0].strftime('%b %d')} → {fc_dates[-1].strftime('%b %d, %Y')} |\n\n"
+                   f"**Day-by-day (first 14 days):**\n\n| Date | Revenue |\n|---|---|\n"
+                   f"{day_rows}\n\n"
+                   f"> *Day-of-week adjusted · 5% growth factor applied*"
+                   + debug_info)
+        return fig, summary
     except Exception as e:
-        return go.Figure().update_layout(**dark_layout(f"Forecast error: {str(e)[:80]}", height=460)), f"Error: {e}", empty_season
+        return go.Figure().update_layout(**dark_layout(f"Error: {e}", height=460)), f"Error: {e}"
 
 # ── Intelligence Chat ─────────────────────────────────────────────────────────
 # ── Tool-calling intelligence layer (mirrors Stores Intelligence architecture) ─
@@ -1110,7 +1046,7 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
         with gr.TabItem("📈 Forecast"):
             gr.HTML(f"<p style='color:#7fb3d3;font-size:12px;margin:8px 0;'>Day-of-week adjusted moving average · 5% growth · Uses the date range selected above.</p>")
             with gr.Row():
-                seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],
+                seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex × Brand'],
                                     value='Overall', label="Segment Type")
                 seg_name = gr.Dropdown(choices=['All Complexes & Brands'],
                                        value='All Complexes & Brands', label="Segment", interactive=True)
@@ -1161,7 +1097,7 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
     seg_type.change(fn=update_seg_choices, inputs=[seg_type], outputs=[seg_name])
     fc_btn.click(fn=generate_forecast,
                  inputs=[seg_type, seg_name, horizon, date_from, date_to],
-                 outputs=[fc_chart, fc_summary, fc_season])
+                 outputs=[fc_chart, fc_summary])
 
     def respond(message, history, df, dt):
         if not message or not message.strip(): return history or [], ""
