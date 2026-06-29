@@ -245,71 +245,86 @@ def build_dashboard(date_from, date_to):
                        hovermode='x unified', bargap=0.1,
                        yaxis_tickprefix='$', yaxis_tickformat=',.0f')
 
-    # 4. Avg Spend Per Customer
+    # 4. Avg Spend Per Customer — pandas 2.x safe
     if 'customer_count' in dff.columns and dff['customer_count'].sum() > 0:
-        avs = dff[dff['customer_count']>0].groupby('complex').apply(
-            lambda x: x['actual_revenue_usd'].sum()/x['customer_count'].sum()
-        ).reset_index(name='avg').sort_values('avg', ascending=True)
-        fig4 = go.Figure(go.Bar(
-            x=avs['avg'], y=avs['complex'], orientation='h',
-            marker=dict(color=C_TEAL, line=dict(color=C_NAVY, width=1)),
-            text=[f"${v:.2f}" for v in avs['avg']], textposition='inside',
-            insidetextanchor='middle', textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial', weight='bold')
-        ))
-        fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280),
-                           xaxis_tickprefix='$', xaxis_tickformat=',.2f')
+        cx_agg = dff[dff['customer_count']>0].groupby('complex').agg(
+            rev=('actual_revenue_usd','sum'), cust=('customer_count','sum')
+        ).reset_index()
+        cx_agg['avg'] = cx_agg['rev'] / cx_agg['cust'].replace(0, np.nan)
+        cx_agg = cx_agg.dropna(subset=['avg']).sort_values('avg', ascending=True)
+        if cx_agg.empty:
+            fig4 = go.Figure()
+            fig4.add_annotation(text="No customer count data", xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=13))
+            fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280))
+        else:
+            fig4 = go.Figure(go.Bar(
+                x=cx_agg['avg'], y=cx_agg['complex'], orientation='h',
+                marker=dict(color=C_TEAL, line=dict(color=C_NAVY, width=1)),
+                text=[f"${v:.2f}" for v in cx_agg['avg']], textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(color='#1B2A4E', size=11, family='Inter, Arial')
+            ))
+            fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280),
+                               xaxis_tickprefix='$', xaxis_tickformat=',.2f')
     else:
-        fig4 = go.Figure().update_layout(**dark_layout("No customer data", height=280))
+        fig4 = go.Figure()
+        fig4.add_annotation(text="No customer count data in dataset", xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=13))
+        fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280))
 
-    # 5. Budget Achievement Heatmap
+    # 5. Budget Achievement Heatmap — pandas 2.x safe (no groupby.apply)
     if 'budget_usd' in dff.columns and dff['budget_usd'].sum() > 0:
         try:
-            heat = dff.groupby(['complex','brand']).apply(
-                lambda x: x['actual_revenue_usd'].sum()/x['budget_usd'].sum()*100
-                          if x['budget_usd'].sum()>0 else 0
-            ).reset_index(name='ach')
-            pivot = heat.pivot(index='complex', columns='brand', values='ach').fillna(0)
+            gb = dff.groupby(['complex','brand']).agg(
+                actual=('actual_revenue_usd','sum'),
+                budget=('budget_usd','sum')
+            ).reset_index()
+            gb['ach'] = (gb['actual'] / gb['budget'].replace(0, np.nan) * 100).fillna(0).round(1)
+            pivot = gb.pivot(index='complex', columns='brand', values='ach').fillna(0)
+            z_text = [[f"{v:.0f}%" for v in row] for row in pivot.values]
             fig5 = go.Figure(go.Heatmap(
                 z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
-                colorscale=[[0,'#c0392b'],[0.8,'#f39c12'],[1,'#2ecc71']],
+                colorscale=[[0,'#C0392B'],[0.5,'#F39C12'],[1,'#27AE60']],
                 zmid=100, zmin=70, zmax=130,
-                text=[[f"{v:.0f}%" for v in row] for row in pivot.values],
-                texttemplate="%{text}", textfont=dict(color='white', size=12),
-                colorbar=dict(tickfont=dict(color=C_TEXT))
+                text=z_text, texttemplate="%{text}",
+                textfont=dict(color='white', size=13, family='Inter, Arial'),
+                colorbar=dict(tickfont=dict(color='#374151'), ticksuffix='%')
             ))
-            fig5.update_layout(**dark_layout("Budget Achievement % (Complex × Brand)", height=280,
-                                             margin=dict(l=130,r=30,t=45,b=80)))
-        except:
-            fig5 = go.Figure().update_layout(**dark_layout("Budget heatmap unavailable", height=280))
+            fig5.update_layout(**dark_layout("Budget Achievement % (Complex × Brand)", height=300,
+                                             margin=dict(l=130,r=80,t=50,b=90)))
+        except Exception as ex:
+            fig5 = go.Figure()
+            fig5.add_annotation(text=f"Heatmap error: {ex}", xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=12))
+            fig5.update_layout(**dark_layout("Budget Achievement", height=300))
     else:
-        fig5 = go.Figure().update_layout(**dark_layout("No budget data", height=280))
+        fig5 = go.Figure()
+        fig5.add_annotation(text="No budget data available", xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=14))
+        fig5.update_layout(**dark_layout("Budget Achievement %", height=300))
 
-    # 6. Actual vs Prior Month vs Prior Year
-    has_pm = 'prior_month_actual' in dff.columns and dff['prior_month_actual'].sum() > 0
-    has_py = 'prior_year_actual'  in dff.columns and dff['prior_year_actual'].sum()  > 0
-    comp = dff.groupby('complex').agg(
-        actual=('actual_revenue_usd','sum'),
-        **({'pm':('prior_month_actual','sum')} if has_pm else {}),
-        **({'py':('prior_year_actual','sum')} if has_py else {})
-    ).reset_index()
+    # 6. Revenue by Complex — Brand Breakdown (replaces sparse prior period chart)
+    # Shows stacked contribution of each brand within each complex
     fig6 = go.Figure()
-    if has_py:
-        fig6.add_trace(go.Bar(name='Prior Year', x=comp['complex'], y=comp['py'],
-            marker=dict(color=C_NAVY, line=dict(color=C_GRID,width=1)),
-            text=[fmt(v) for v in comp['py']], textposition='inside',
-            insidetextanchor='middle', textfont=dict(color='#ffffff',size=11)))
-    if has_pm:
-        fig6.add_trace(go.Bar(name='Prior Month', x=comp['complex'], y=comp['pm'],
-            marker=dict(color=C_TEAL, line=dict(color=C_GRID,width=1)),
-            text=[fmt(v) for v in comp['pm']], textposition='inside',
-            insidetextanchor='middle', textfont=dict(color='#0a1628',size=11)))
-    fig6.add_trace(go.Bar(name='This Period', x=comp['complex'], y=comp['actual'],
-        marker=dict(color=C_GOLD, line=dict(color=C_NAVY,width=1)),
-        text=[fmt(v) for v in comp['actual']], textposition='inside',
-        insidetextanchor='middle', textfont=dict(color='#0a1628',size=11)))
-    fig6.update_layout(**dark_layout("Actual vs Prior Month vs Prior Year", height=340,
-                                     margin=dict(l=60,r=30,t=45,b=60)),
-                       barmode='group', hovermode='x unified',
+    brand_colors = {BRANDS[0]: C_NAVY, BRANDS[1]: C_GOLD, BRANDS[2]: C_TEAL, BRANDS[3]: C_RED}
+    for brand in BRANDS:
+        sub = dff[dff['brand']==brand].groupby('complex')['actual_revenue_usd'].sum().reset_index()
+        # Ensure all complexes appear even if value is 0
+        sub = sub.set_index('complex').reindex(COMPLEXES, fill_value=0).reset_index()
+        sub.columns = ['complex','revenue']
+        fig6.add_trace(go.Bar(
+            name=brand, x=sub['complex'], y=sub['revenue'],
+            marker=dict(color=brand_colors.get(brand, C_NAVY),
+                        line=dict(color='white', width=0.5)),
+            text=[fmt(v) if v > 0 else '' for v in sub['revenue']],
+            textposition='inside', insidetextanchor='middle',
+            textfont=dict(color='white', size=10, family='Inter, Arial'),
+            hovertemplate='%{x}<br>' + brand + ': $%{y:,.0f}<extra></extra>'
+        ))
+    fig6.update_layout(**dark_layout("Revenue by Complex & Brand (Stacked)", height=340,
+                                     margin=dict(l=60,r=30,t=50,b=60)),
+                       barmode='stack', hovermode='x unified',
                        yaxis_tickprefix='$', yaxis_tickformat=',.0f')
 
     return kpi, fig1, fig2, fig3, fig4, fig5, fig6
@@ -358,8 +373,8 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
             return go.Figure().update_layout(**dark_layout("Need at least 7 days of data for this segment")), "Insufficient data."
         last = seg['date'].max()
         base = float(seg['revenue'].tail(min(h, len(seg))).mean())
-        # Limit historical display to last 90 days so forecast is proportionally visible
-        seg_display = seg[seg['date'] >= last - timedelta(days=90)].reset_index(drop=True)
+        # Show last 30 days of history — makes weekly cycles clearly visible
+        seg_display = seg[seg['date'] >= last - timedelta(days=30)].reset_index(drop=True)
         if np.isnan(base) or base <= 0: base = float(seg['revenue'].mean())
         fc_dates = [last + timedelta(days=i+1) for i in range(h)]
         fc_vals  = [round(base * DOW[d.weekday()] * (1+GROWTH), 2) for d in fc_dates]
@@ -387,8 +402,10 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         fig.add_vline(x=str(last)[:10], line_dash='dot', line_color=C_GOLD, opacity=0.5)
         hist_vals = [v for v in seg_display['revenue'].tolist() if v and not np.isnan(float(v))]
         all_vals = hist_vals + fc_vals + upper
-        y_max = max(all_vals) * 1.20 if all_vals else 1
-        y_min = 0  # always start from 0 so historical line is never cut off
+        y_max = max(all_vals) * 1.15 if all_vals else 1
+        # Start y-axis near data minimum so weekly cycles are clearly visible
+        data_min = min(hist_vals + lower) if hist_vals else 0
+        y_min = max(0, data_min * 0.85)
         layout = dark_layout(f"{label} — {h}-Day Forecast", height=480,
                              margin=dict(l=80,r=40,t=60,b=50))
         layout['hovermode'] = 'x unified'
