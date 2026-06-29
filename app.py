@@ -402,7 +402,17 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         # Show first 14 days breakdown
         day_rows = "\n".join([f"| {fc_dates[i].strftime('%a %b %d')} | **{fmt(fc_vals[i])}** |"
                                for i in range(min(14, h))])
-        debug_info = f"\n\n> *Historical avg: {fmt(float(seg['revenue'].mean()))}/day · Base used: {fmt(base)}/day*"
+        # Debug: show actual sample values from seg
+        sample_rows = seg.tail(5)
+        sample_str = " | ".join([f"{r.date.strftime('%b %d')}={fmt(r.revenue)}" 
+                                  for r in sample_rows.itertuples()])
+        debug_info = (f"\n\n**Debug (check these are correct):**\n"
+                      f"- Rows in segment: {len(seg)}\n"
+                      f"- Historical avg: {fmt(float(seg['revenue'].mean()))}/day\n"
+                      f"- Base for forecast: {fmt(base)}/day\n"
+                      f"- Last 5 days: {sample_str}\n"
+                      f"- Data range: {seg['date'].min().strftime('%b %d, %Y')} → {seg['date'].max().strftime('%b %d, %Y')}\n"
+                      f"- Records in full df: {len(df)}")
         summary = (f"**{h}-Day Forecast — {label}**\n\n"
                    f"| Metric | Value |\n|---|---|\n"
                    f"| Predicted Total | **{fmt(total)}** |\n"
