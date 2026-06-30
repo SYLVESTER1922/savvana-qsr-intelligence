@@ -31,7 +31,7 @@ def _load_logo_html():
         if path.exists():
             print(f"[logo] Found logo at: {path}")
             data = base64.b64encode(path.read_bytes()).decode()
-            return f'<img src="data:image/png;base64,{data}" alt="Netrisyl Insights" style="height:56px;width:auto;object-fit:contain;"/>'
+            return f'<img src="data:image/png;base64,{data}" alt="Netrisyl Insights" style="height:88px;width:auto;object-fit:contain;"/>'
     print("[logo] NI_logo.png NOT FOUND in any of:", [str(p) for p in candidates])
     return ''
 _logo_html = _load_logo_html()
