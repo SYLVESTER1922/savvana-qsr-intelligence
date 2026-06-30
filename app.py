@@ -21,13 +21,21 @@ except: pass
 # ── Logo — load from file if present, fallback to text ───────────────────────
 def _load_logo_html():
     import base64, pathlib
-    for path in [pathlib.Path(__file__).parent / "NI_logo.png",
-                 pathlib.Path("NI_logo.png")]:
+    candidates = [
+        pathlib.Path(__file__).parent / "NI_logo.png",
+        pathlib.Path("NI_logo.png"),
+        pathlib.Path("/app/NI_logo.png"),
+        pathlib.Path("/home/user/app/NI_logo.png"),
+    ]
+    for path in candidates:
         if path.exists():
+            print(f"[logo] Found logo at: {path}")
             data = base64.b64encode(path.read_bytes()).decode()
             return f'<img src="data:image/png;base64,{data}" alt="Netrisyl Insights" style="height:56px;width:auto;object-fit:contain;"/>'
+    print("[logo] NI_logo.png NOT FOUND in any of:", [str(p) for p in candidates])
     return ''
 _logo_html = _load_logo_html()
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -1158,10 +1166,8 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
             chatbot_box = gr.Chatbot(height=440, show_label=False, bubble_full_width=False)
 
             with gr.Row():
-                mic_input  = gr.Audio(sources=["microphone"], type="filepath",
-                                      show_label=False, scale=1)
                 chat_input = gr.Textbox(placeholder="Ask about operations...",
-                                        show_label=False, scale=7, container=False)
+                                        show_label=False, scale=8, container=False)
                 send_btn   = gr.Button("Send ➤", variant="primary", scale=1)
 
             with gr.Row():
@@ -1267,23 +1273,6 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
             return f"No messages found containing \"{query}\"."
         return f"**{len(matches)} match(es) for \"{query}\":**\n\n" + "\n\n".join(matches)
 
-    def transcribe_voice(audio_path):
-        if not audio_path:
-            return ""
-        try:
-            with open(audio_path, "rb") as f:
-                files = {"file": ("audio.wav", f, "audio/wav")}
-                data  = {"model": "whisper-1"}
-                r = _http.post(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-                    files=files, data=data, timeout=30
-                )
-            r.raise_for_status()
-            return r.json().get("text", "")
-        except Exception as e:
-            return f"(voice transcription failed: {e})"
-
     send_btn.click(fn=respond, inputs=[chat_input, chatbot_box, date_from, date_to],
                    outputs=[chatbot_box, chat_input])
     chat_input.submit(fn=respond, inputs=[chat_input, chatbot_box, date_from, date_to],
@@ -1309,17 +1298,6 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
     clear_btn.click(fn=clear_chat_fn, inputs=[], outputs=[chatbot_box, export_file, search_results])
     search_btn.click(fn=search_chat_fn, inputs=[search_box, chatbot_box], outputs=[search_results])
     search_box.submit(fn=search_chat_fn, inputs=[search_box, chatbot_box], outputs=[search_results])
-
-    # Voice input — transcribe then auto-send
-    def voice_to_chat(audio_path, history, df, dt):
-        text = transcribe_voice(audio_path)
-        if not text or text.startswith("(voice"):
-            return history or [], text or ""
-        return respond(text, history, df, dt)
-
-    mic_input.stop_recording(fn=voice_to_chat,
-                             inputs=[mic_input, chatbot_box, date_from, date_to],
-                             outputs=[chatbot_box, chat_input])
 
     # Auto-load dashboard on startup with full dataset
     demo.load(
