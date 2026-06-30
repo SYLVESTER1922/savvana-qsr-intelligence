@@ -294,7 +294,7 @@ def build_dashboard(date_from, date_to):
             x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=13))
         fig4.update_layout(**dark_layout("Avg Spend Per Customer", height=280))
 
-    # 5. Budget Achievement Heatmap — pandas 2.x safe (no groupby.apply)
+    # 5. Budget Achievement Heatmap — values converted to plain lists for reliable rendering
     if 'budget_usd' in dff.columns and dff['budget_usd'].sum() > 0:
         try:
             gb = dff.groupby(['complex','brand']).agg(
@@ -303,22 +303,27 @@ def build_dashboard(date_from, date_to):
             ).reset_index()
             gb['ach'] = (gb['actual'] / gb['budget'].replace(0, np.nan) * 100).fillna(0).round(1)
             pivot = gb.pivot(index='complex', columns='brand', values='ach').fillna(0)
-            z_text = [[f"{v:.0f}%" for v in row] for row in pivot.values]
+            z_list = [[float(v) for v in row] for row in pivot.values]
+            x_list = [str(c) for c in pivot.columns.tolist()]
+            y_list = [str(c) for c in pivot.index.tolist()]
+            z_text = [[f"{v:.0f}%" for v in row] for row in z_list]
+            if not z_list or all(all(v == 0 for v in row) for row in z_list):
+                raise ValueError("No non-zero budget achievement values")
             fig5 = go.Figure(go.Heatmap(
-                z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+                z=z_list, x=x_list, y=y_list,
                 colorscale=[[0,'#C0392B'],[0.5,'#F39C12'],[1,'#27AE60']],
                 zmid=100, zmin=70, zmax=130,
                 text=z_text, texttemplate="%{text}",
                 textfont=dict(color='white', size=13, family='Inter, Arial'),
                 colorbar=dict(tickfont=dict(color='#374151'), ticksuffix='%')
             ))
-            fig5.update_layout(**dark_layout("Budget Achievement % (Complex × Brand)", height=300,
+            fig5.update_layout(**dark_layout("Budget Achievement % (Complex x Brand)", height=300,
                                              margin=dict(l=130,r=80,t=50,b=90)))
         except Exception as ex:
             fig5 = go.Figure()
-            fig5.add_annotation(text=f"Heatmap error: {ex}", xref="paper", yref="paper",
+            fig5.add_annotation(text=f"Budget achievement: {ex}", xref="paper", yref="paper",
                 x=0.5, y=0.5, showarrow=False, font=dict(color=C_NAVY, size=12))
-            fig5.update_layout(**dark_layout("Budget Achievement", height=300))
+            fig5.update_layout(**dark_layout("Budget Achievement %", height=300))
     else:
         fig5 = go.Figure()
         fig5.add_annotation(text="No budget data available", xref="paper", yref="paper",
@@ -1069,14 +1074,35 @@ div[class*="chatbot"], .chatbot { background: #fafafa !important; border-radius:
 ::-webkit-scrollbar-thumb { background: #C9A55C; border-radius: 4px; }
 footer { display: none !important; }
 
-/* Chat bubbles — Stores Intelligence theme */
-.gradio-container .message.bot, .gradio-container [data-testid="bot"] {
-  background: #1B2A4E !important; color: #ffffff !important;
+/* Chat bubbles — Stores Intelligence theme (broad selectors for Gradio 5.x markup) */
+.gradio-container .message.bot,
+.gradio-container .message.bot *,
+.gradio-container [data-testid="bot"],
+.gradio-container [data-testid="bot"] *,
+.gradio-container .bot-row .message,
+.gradio-container .bot-row .message * {
+  background: #1B2A4E !important;
+  color: #ffffff !important;
   border-radius: 16px 16px 16px 4px !important;
 }
-.gradio-container .message.user, .gradio-container [data-testid="user"] {
-  background: #C9A55C !important; color: #1B2A4E !important;
-  border-radius: 16px 16px 4px 16px !important; font-weight: 500 !important;
+.gradio-container .message.user,
+.gradio-container .message.user *,
+.gradio-container [data-testid="user"],
+.gradio-container [data-testid="user"] *,
+.gradio-container .user-row .message,
+.gradio-container .user-row .message * {
+  background: #C9A55C !important;
+  color: #1B2A4E !important;
+  border-radius: 16px 16px 4px 16px !important;
+  font-weight: 500 !important;
+}
+/* Links inside bubbles stay legible */
+.gradio-container .message.bot a { color: #C9A55C !important; }
+.gradio-container .message.user a { color: #1B2A4E !important; text-decoration: underline !important; }
+/* Code/inline blocks inside bubbles */
+.gradio-container .message.bot code,
+.gradio-container .message.user code {
+  background: rgba(0,0,0,0.15) !important; border-radius: 4px !important;
 }
 """
 
@@ -1113,33 +1139,6 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
 
     with gr.Tabs():
 
-        # ── Dashboard ─────────────────────────────────────────────────────────
-        with gr.TabItem("📊 Dashboard"):
-            with gr.Row():
-                ch1 = gr.Plot(show_label=False)
-                ch2 = gr.Plot(show_label=False)
-            with gr.Row():
-                ch3 = gr.Plot(show_label=False)
-                ch4 = gr.Plot(show_label=False)
-            with gr.Row():
-                ch5 = gr.Plot(show_label=False)
-                ch6 = gr.Plot(show_label=False)
-
-        # ── Forecast ──────────────────────────────────────────────────────────
-        with gr.TabItem("📈 Forecast"):
-            gr.HTML("<div style='background:#f0f4ff;border-left:4px solid #1B2A4E;padding:10px 16px;border-radius:6px;margin:8px 0 12px;'><p style='margin:0;color:#1B2A4E;font-size:13px;font-weight:600;'>Prophet Time Series Forecast</p><p style='margin:4px 0 0;color:#6b7280;font-size:12px;'>Trained on your actual data with DRC public holidays and weekly seasonality. Red dotted lines mark upcoming DRC holidays in the forecast window.</p></div>")
-            with gr.Row():
-                seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],
-                                    value='Overall', label="Segment Type")
-                seg_name = gr.Dropdown(choices=['All Complexes & Brands'],
-                                       value='All Complexes & Brands', label="Segment", interactive=True)
-                horizon  = gr.Radio(choices=["30","60","90"], value="60", label="Horizon (days)")
-                fc_btn   = gr.Button("⚡ Generate Forecast", variant="primary")
-            fc_chart   = gr.Plot(show_label=False)
-            with gr.Row():
-                fc_summary = gr.Markdown()
-                fc_season  = gr.Plot(show_label=False)
-
         # ── Chat ──────────────────────────────────────────────────────────────
         with gr.TabItem("💬 Intelligence Chat"):
             gr.HTML(f"""<div style="background:#0d1628;border:1px solid {C_GRID};border-radius:8px;
@@ -1174,6 +1173,33 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
             export_file    = gr.File(label="Download", visible=False)
             search_results = gr.Markdown()
 
+
+        # ── Forecast ──────────────────────────────────────────────────────────
+        with gr.TabItem("📈 Forecast"):
+            gr.HTML("<div style='background:#f0f4ff;border-left:4px solid #1B2A4E;padding:10px 16px;border-radius:6px;margin:8px 0 12px;'><p style='margin:0;color:#1B2A4E;font-size:13px;font-weight:600;'>Prophet Time Series Forecast</p><p style='margin:4px 0 0;color:#6b7280;font-size:12px;'>Trained on your actual data with DRC public holidays and weekly seasonality. Red dotted lines mark upcoming DRC holidays in the forecast window.</p></div>")
+            with gr.Row():
+                seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],
+                                    value='Overall', label="Segment Type")
+                seg_name = gr.Dropdown(choices=['All Complexes & Brands'],
+                                       value='All Complexes & Brands', label="Segment", interactive=True)
+                horizon  = gr.Radio(choices=["30","60","90"], value="60", label="Horizon (days)")
+                fc_btn   = gr.Button("⚡ Generate Forecast", variant="primary")
+            fc_chart   = gr.Plot(show_label=False)
+            with gr.Row():
+                fc_summary = gr.Markdown()
+                fc_season  = gr.Plot(show_label=False)
+
+        # ── Dashboard ─────────────────────────────────────────────────────────
+        with gr.TabItem("📊 Dashboard"):
+            with gr.Row():
+                ch1 = gr.Plot(show_label=False)
+                ch2 = gr.Plot(show_label=False)
+            with gr.Row():
+                ch3 = gr.Plot(show_label=False)
+                ch4 = gr.Plot(show_label=False)
+            with gr.Row():
+                ch5 = gr.Plot(show_label=False)
+                ch6 = gr.Plot(show_label=False)
 
     gr.HTML(f'<div style="text-align:center;margin-top:14px;padding:10px;border-top:1px solid {C_GRID};"><p style="color:{C_GOLD};font-size:10px;font-weight:700;letter-spacing:2px;margin:0;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:10px;margin:4px 0 0;">Data · Analytics · Intelligence · <a href="https://netrisyl.com" style="color:#7fb3d3;">netrisyl.com</a></p></div>')
 
