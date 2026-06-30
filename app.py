@@ -423,43 +423,52 @@ def generate_forecast(seg_type, seg_name, horizon, date_from, date_to):
         fc_only['yhat_lower'] = fc_only['yhat_lower'].clip(lower=0)
         fc_only['yhat_upper'] = fc_only['yhat_upper'].clip(lower=0)
 
+        # Convert everything to plain lists — pandas Series/Timestamps can fail
+        # to serialize through Gradio's plot JSON pipeline and render a blank chart.
+        hist_x = [str(d.date()) for d in hist_60['ds']]
+        hist_y = hist_60['y'].astype(float).tolist()
+        fc_x   = [str(d.date()) for d in fc_only['ds']]
+        fc_y   = fc_only['yhat'].astype(float).tolist()
+        fc_up  = fc_only['yhat_upper'].astype(float).tolist()
+        fc_low = fc_only['yhat_lower'].astype(float).tolist()
+
         # ── Main forecast chart ───────────────────────────────────────────────
         fig = go.Figure()
         # Confidence band
         fig.add_trace(go.Scatter(
-            x=pd.concat([fc_only['ds'], fc_only['ds'].iloc[::-1]]),
-            y=pd.concat([fc_only['yhat_upper'], fc_only['yhat_lower'].iloc[::-1]]),
-            fill='toself', fillcolor='rgba(201,165,92,0.15)',
+            x=fc_x + fc_x[::-1],
+            y=fc_up + fc_low[::-1],
+            fill='toself', fillcolor='rgba(201,165,92,0.18)',
             line=dict(color='rgba(0,0,0,0)'), name='80% Confidence', hoverinfo='skip'))
         # Historical
         fig.add_trace(go.Scatter(
-            x=hist_60['ds'], y=hist_60['y'],
+            x=hist_x, y=hist_y,
             name='Historical (last 60d)', mode='lines+markers',
             line=dict(color=C_NAVY, width=2.5),
             marker=dict(size=4, color=C_NAVY),
-            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Actual</extra>'))
+            hovertemplate='%{x}<br>$%{y:,.0f}<extra>Actual</extra>'))
         # Prophet forecast
         fig.add_trace(go.Scatter(
-            x=fc_only['ds'], y=fc_only['yhat'],
+            x=fc_x, y=fc_y,
             name=f'Prophet {h}-Day Forecast', mode='lines+markers',
             line=dict(color=C_GOLD, width=3, dash='dash'),
             marker=dict(size=6, color=C_GOLD, line=dict(color=C_NAVY, width=1.2)),
-            hovertemplate='%{x|%b %d, %Y}<br>$%{y:,.0f}<extra>Forecast</extra>'))
+            hovertemplate='%{x}<br>$%{y:,.0f}<extra>Forecast</extra>'))
         # Mark DRC holidays in forecast window
         import holidays as _hol
         drc = _hol.country_holidays('CD', years=[last.year, last.year+1])
         for hdate, hname in drc.items():
             hts = pd.Timestamp(hdate)
             if last < hts <= last + timedelta(days=h):
-                fig.add_vline(x=str(hts)[:10], line_dash='dot',
+                fig.add_vline(x=str(hts.date()), line_dash='dot',
                               line_color=C_RED, opacity=0.5,
                               annotation_text=hname[:20],
                               annotation_position='top left',
                               annotation_font=dict(size=9, color=C_RED))
-        fig.add_vline(x=str(last)[:10], line_dash='dot', line_color='#374151', opacity=0.4)
-        y_vals = list(hist_60['y']) + list(fc_only['yhat_upper'])
+        fig.add_vline(x=str(last.date()), line_dash='dot', line_color='#374151', opacity=0.4)
+        y_vals = hist_y + fc_up
         y_max  = max(y_vals) * 1.18 if y_vals else 1
-        y_min  = max(0, min(list(hist_60['y']) + list(fc_only['yhat_lower'])) * 0.85)
+        y_min  = max(0, min(hist_y + fc_low) * 0.85) if (hist_y or fc_low) else 0
         layout = dark_layout(f"Prophet Forecast — {label} ({h} days)", height=460, margin=dict(l=80,r=40,t=70,b=50))
         layout.update(hovermode='x unified', yaxis_tickprefix='$', yaxis_tickformat=',.0f',
                       yaxis_range=[y_min, y_max])
@@ -1059,6 +1068,16 @@ div[class*="chatbot"], .chatbot { background: #fafafa !important; border-radius:
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: #C9A55C; border-radius: 4px; }
 footer { display: none !important; }
+
+/* Chat bubbles — Stores Intelligence theme */
+.gradio-container .message.bot, .gradio-container [data-testid="bot"] {
+  background: #1B2A4E !important; color: #ffffff !important;
+  border-radius: 16px 16px 16px 4px !important;
+}
+.gradio-container .message.user, .gradio-container [data-testid="user"] {
+  background: #C9A55C !important; color: #1B2A4E !important;
+  border-radius: 16px 16px 4px 16px !important; font-weight: 500 !important;
+}
 """
 
 theme = gr.themes.Soft(
@@ -1128,14 +1147,33 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
                 <p style="color:{C_GOLD};font-weight:700;margin:0 0 5px;font-size:13px;">
                     💡 Ask anything about Savanna QSR Group operations</p>
                 <p style="color:#7fb3d3;font-size:12px;margin:0;">
-                    "Which complex is below budget?" · "Compare prior month revenue" ·
-                    "What's the 7-day trend?" · "Avg spend per customer?" ·
-                    "Rank all brands" · "Which site needs attention?"</p></div>""")
-            chatbot_box = gr.Chatbot(height=440, show_label=False)
+                    Tap a suggestion below, type your own question, or use the mic.</p></div>""")
+
             with gr.Row():
+                sq1 = gr.Button("Which complex is below budget?", size="sm")
+                sq2 = gr.Button("Compare prior month revenue", size="sm")
+                sq3 = gr.Button("What's the 7-day trend?", size="sm")
+                sq4 = gr.Button("Rank all brands", size="sm")
+                sq5 = gr.Button("Which site needs attention?", size="sm")
+
+            chatbot_box = gr.Chatbot(height=440, show_label=False, bubble_full_width=False)
+
+            with gr.Row():
+                mic_input  = gr.Audio(sources=["microphone"], type="filepath",
+                                      show_label=False, scale=1)
                 chat_input = gr.Textbox(placeholder="Ask about operations...",
-                                        show_label=False, scale=9, container=False)
+                                        show_label=False, scale=7, container=False)
                 send_btn   = gr.Button("Send ➤", variant="primary", scale=1)
+
+            with gr.Row():
+                export_btn  = gr.Button("⬇ Export Chat", size="sm")
+                clear_btn   = gr.Button("🗑 Clear Chat", size="sm")
+                search_box  = gr.Textbox(placeholder="Search past messages...",
+                                         show_label=False, scale=3, container=False)
+                search_btn  = gr.Button("🔍 Search", size="sm", scale=1)
+            export_file    = gr.File(label="Download", visible=False)
+            search_results = gr.Markdown()
+
 
     gr.HTML(f'<div style="text-align:center;margin-top:14px;padding:10px;border-top:1px solid {C_GRID};"><p style="color:{C_GOLD};font-size:10px;font-weight:700;letter-spacing:2px;margin:0;">NETRISYL INSIGHTS</p><p style="color:#4a6a9e;font-size:10px;margin:4px 0 0;">Data · Analytics · Intelligence · <a href="https://netrisyl.com" style="color:#7fb3d3;">netrisyl.com</a></p></div>')
 
@@ -1172,10 +1210,90 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
         h.append((message, reply))
         return h, ""
 
+    def export_chat_fn(history):
+        if not history:
+            return gr.update(value=None, visible=False)
+        lines = ["# Savanna QSR Intelligence — Chat Export",
+                 f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+        for q, a in history:
+            lines.append(f"**You:** {q}")
+            lines.append(f"**Assistant:** {a}")
+            lines.append("")
+        path = "/tmp/savanna_chat_export.md"
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+        return gr.update(value=path, visible=True)
+
+    def clear_chat_fn():
+        return [], gr.update(value=None, visible=False), ""
+
+    def search_chat_fn(query, history):
+        if not query or not query.strip():
+            return "Type a keyword to search past messages."
+        if not history:
+            return "No chat history yet."
+        q = query.lower().strip()
+        matches = []
+        for i, (usr, asst) in enumerate(history):
+            if q in usr.lower() or q in asst.lower():
+                matches.append(f"**#{i+1} — You:** {usr}\n\n**Assistant:** {asst}\n\n---")
+        if not matches:
+            return f"No messages found containing \"{query}\"."
+        return f"**{len(matches)} match(es) for \"{query}\":**\n\n" + "\n\n".join(matches)
+
+    def transcribe_voice(audio_path):
+        if not audio_path:
+            return ""
+        try:
+            with open(audio_path, "rb") as f:
+                files = {"file": ("audio.wav", f, "audio/wav")}
+                data  = {"model": "whisper-1"}
+                r = _http.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_KEY}"},
+                    files=files, data=data, timeout=30
+                )
+            r.raise_for_status()
+            return r.json().get("text", "")
+        except Exception as e:
+            return f"(voice transcription failed: {e})"
+
     send_btn.click(fn=respond, inputs=[chat_input, chatbot_box, date_from, date_to],
                    outputs=[chatbot_box, chat_input])
     chat_input.submit(fn=respond, inputs=[chat_input, chatbot_box, date_from, date_to],
                       outputs=[chatbot_box, chat_input])
+
+    # Suggested question buttons — each sends its own fixed question text to chat
+    SUGGESTED_QUESTIONS = [
+        "Which complex is below budget?",
+        "Compare prior month revenue",
+        "What's the 7-day trend?",
+        "Rank all brands",
+        "Which site needs attention?",
+    ]
+    for sq_btn, q_text in zip([sq1, sq2, sq3, sq4, sq5], SUGGESTED_QUESTIONS):
+        sq_btn.click(
+            fn=(lambda history, df, dt, fixed_q=q_text: respond(fixed_q, history, df, dt)),
+            inputs=[chatbot_box, date_from, date_to],
+            outputs=[chatbot_box, chat_input]
+        )
+
+    # Export / clear / search
+    export_btn.click(fn=export_chat_fn, inputs=[chatbot_box], outputs=[export_file])
+    clear_btn.click(fn=clear_chat_fn, inputs=[], outputs=[chatbot_box, export_file, search_results])
+    search_btn.click(fn=search_chat_fn, inputs=[search_box, chatbot_box], outputs=[search_results])
+    search_box.submit(fn=search_chat_fn, inputs=[search_box, chatbot_box], outputs=[search_results])
+
+    # Voice input — transcribe then auto-send
+    def voice_to_chat(audio_path, history, df, dt):
+        text = transcribe_voice(audio_path)
+        if not text or text.startswith("(voice"):
+            return history or [], text or ""
+        return respond(text, history, df, dt)
+
+    mic_input.stop_recording(fn=voice_to_chat,
+                             inputs=[mic_input, chatbot_box, date_from, date_to],
+                             outputs=[chatbot_box, chat_input])
 
     # Auto-load dashboard on startup with full dataset
     demo.load(
