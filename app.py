@@ -1108,16 +1108,18 @@ with gr.Blocks(title="Savanna QSR Intelligence | Netrisyl Insights", theme=theme
 
         # ── Forecast ──────────────────────────────────────────────────────────
         with gr.TabItem("📈 Forecast"):
-            gr.HTML(f"<p style='color:#7fb3d3;font-size:12px;margin:8px 0;'>Day-of-week adjusted moving average · 5% growth · Uses the date range selected above.</p>")
+            gr.HTML("<div style='background:#f0f4ff;border-left:4px solid #1B2A4E;padding:10px 16px;border-radius:6px;margin:8px 0 12px;'><p style='margin:0;color:#1B2A4E;font-size:13px;font-weight:600;'>Prophet Time Series Forecast</p><p style='margin:4px 0 0;color:#6b7280;font-size:12px;'>Trained on your actual data with DRC public holidays and weekly seasonality. Red dotted lines mark upcoming DRC holidays in the forecast window.</p></div>")
             with gr.Row():
                 seg_type = gr.Radio(choices=['Overall','By Complex','By Brand','Complex x Brand'],
                                     value='Overall', label="Segment Type")
                 seg_name = gr.Dropdown(choices=['All Complexes & Brands'],
                                        value='All Complexes & Brands', label="Segment", interactive=True)
-                horizon  = gr.Radio(choices=["7","14","30","60"], value="30", label="Horizon (days)")
+                horizon  = gr.Radio(choices=["30","60","90"], value="60", label="Horizon (days)")
                 fc_btn   = gr.Button("⚡ Generate Forecast", variant="primary")
             fc_chart   = gr.Plot(show_label=False)
-            fc_summary = gr.Markdown()
+            with gr.Row():
+                fc_summary = gr.Markdown()
+                fc_season  = gr.Plot(show_label=False)
 
         # ── Chat ──────────────────────────────────────────────────────────────
         with gr.TabItem("💬 Intelligence Chat"):
